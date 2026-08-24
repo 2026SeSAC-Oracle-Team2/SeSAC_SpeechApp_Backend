@@ -1,0 +1,54 @@
+# SeSAC Backend — 시크릿 및 빌드 제외 파일
+
+# 환경변수
+.env
+.env.local
+.env.*.local
+
+# OCI API Key
+.oci/
+*.pem
+*.key
+
+# Firebase Admin SDK JSON
+secrets/*.json
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Gradle / 빌드
+build/
+.gradle/
+gradle/
+gradlew
+gradlew.bat
+*.jar
+*.war
+*.ear
+
+# Kotlin
+*.class
+*.kotlin_module
+
+# 로그
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# 테스트
+test-results/
+coverage/
+
+# 기타
+*.tmp
+*.bak
