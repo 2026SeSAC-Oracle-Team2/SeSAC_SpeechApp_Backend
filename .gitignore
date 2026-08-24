@@ -27,6 +27,7 @@ build/
 # gradlew            ← wrapper 스크립트 포함
 # gradlew.bat        ← wrapper 스크립트 포함
 *.jar
+!gradle/wrapper/gradle-wrapper.jar    # ← Gradle wrapper JAR은 포함
 *.war
 *.ear
 
