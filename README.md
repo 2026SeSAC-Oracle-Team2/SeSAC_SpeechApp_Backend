@@ -79,7 +79,10 @@ SeSAC_SpeechApp_Backend/
 
 ---
 
-## 🖥️ 로컬 개발 환경 (VM 서버)
+## 🖥️ 서버 세팅 (VM)
+
+<details>
+<summary>⬇️ 펼쳐서 보기 (JDK 설치 / 서버 실행 / 방화벽 / 문제 해결)</summary>
 
 ### 1. 필수 설치 요약
 
@@ -113,7 +116,6 @@ sdk default java 21.0.12-tem
 
 # 5. 확인
 java -version
-# openjdk version "21.0.5" 2024-10-15
 ```
 
 #### 방법 B: OS 패키지 관리자 (배포판별)
@@ -132,8 +134,8 @@ java -version
 javac -version
 
 # 4. JAVA_HOME 설정 (선택, 권장)
-# 설치 경로 확인
-ls /usr/lib/jvm/
+# 설치 경로 확인 (SDKMAN이 아닌 APT/dnf 설치일 경우만)
+ls /usr/lib/jvm/ 2>/dev/null
 # 예: java-21-openjdk-arm64
 
 echo 'export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64' >> ~/.bashrc
@@ -142,6 +144,7 @@ source ~/.bashrc
 ```
 
 > **Debian 13(trixie) 참고:** `openjdk-17-jdk`는 기본 리포지토리에 없을 수 있어요. 대신 `openjdk-21-jdk`를 설치하세요.
+> **SDKMAN으로 설치한 경우:** JDK는 `~/.sdkman/candidates/java/`에 설치되며, `.bashrc`에 `sdk default` 설정만 하면 돼요.
 
 **Oracle Linux / RHEL / CentOS / Rocky Linux / AlmaLinux:**
 
@@ -157,8 +160,7 @@ java -version
 javac -version
 
 # 4. JAVA_HOME 설정 (선택, 권장)
-# 설치 경로 확인
-ls /usr/lib/jvm/
+ls /usr/lib/jvm/ 2>/dev/null
 # 예: java-21-openjdk
 
 echo 'export JAVA_HOME=/usr/lib/jvm/java-21-openjdk' >> ~/.bashrc
@@ -207,15 +209,77 @@ sudo dnf install -y gradle
 
 ---
 
-### 4. 서버 실행법
+### 4. 방화벽 설정 (VM 외부 접속 시 필수)
+
+Spring Boot 서버는 기본적으로 **8080 포트**에서 실행됩니다. VM 외부(인터넷/모바일)에서 API를 호출하려면 **방화벽에서 8080 포트를 개방**해야 합니다.
+
+#### OCI (Oracle Cloud) VM 기준
+
+OCI는 **Security List**와 **Network Security Groups** 두 가지로 방화벽을 제어합니다.
+
+**방법 A: OCI Console (웹 브라우저)**
+
+1. [OCI Console](https://cloud.oracle.com) → Networking → Virtual Cloud Networks
+2. 해당 VCN의 **Security List** 선택
+3. **Ingress Rules** → **Add Ingress Rule** 클릭
+4. 아래 내용 입력:
+   - **Source Type:** CIDR
+   - **Source CIDR:** `0.0.0.0/0` (또는 허용할 IP 대역)
+   - **IP Protocol:** TCP
+   - **Destination Port Range:** `8080`
+5. **Add Ingress Rules** 저장
+
+**방법 B: OCI CLI (터미널)**
+
+```bash
+# 1. OCI CLI 로그인
+oci session authenticate
+
+# 2. 보안 규칙 추가 (예시 — 자신의 VCN OCID, Subnet OCID 확인 필요)
+oci network security-list update \
+  --security-list-id ocid1.securitylist.oc1... \
+  --ingress-security-rules '[{"source":"0.0.0.0/0","protocol":"6","tcpOptions":{"destinationPortRange":{"min":8080,"max":8080}}}]'
+```
+
+**방법 C: OS 방화벽 (iptables / firewalld / ufw)**
+
+VM 내부 OS 방화벽도 확인하세요.
+
+```bash
+# === Ubuntu/Debian (ufw) ===
+sudo ufw status
+sudo ufw allow 8080/tcp
+sudo ufw reload
+
+# === Oracle Linux / RHEL / CentOS (firewalld) ===
+sudo firewall-cmd --state
+sudo firewall-cmd --permanent --add-port=8080/tcp
+sudo firewall-cmd --reload
+
+# === iptables (직접) ===
+sudo iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
+sudo iptables-save
+```
+
+#### 방화벽 확인
+
+```bash
+# 외부에서 VM IP로 접속 확인 (새 터미널에서)
+curl http://{VM_IP}:8080/api/v1/auth/firebase \
+  -X POST -H "Content-Type: application/json" -d '{"id_token":"test"}'
+```
+
+---
+
+### 5. 서버 실행법
 
 ```bash
 # 1. 레포 clone (처음 한 번)
 git clone <repo-url>
 cd SeSAC_SpeechApp_Backend
 
-# 2. 브랜치 체크아웃 (인증 API 브랜치)
-git checkout feature/auth-api
+# 2. 브랜치 체크아웃
+git checkout main
 
 # 3. 시크릿 파일 배치 (root 권한으로 직접 복사 필요)
 #    - secrets/sesac-teamproject-firebase-adminsdk-fbsvc-*.json
@@ -228,9 +292,11 @@ git checkout feature/auth-api
 #    sudo cp -r /백업경로/.oci .
 #    sudo chown -R $(whoami):$(whoami) secrets/ .env .oci/
 
-# 4. JAVA_HOME 환경변수 설정 (아직 설정 안 했다면)
+# 4. JAVA_HOME 환경변수 설정 (SDKMAN으로 설치한 경우)
+source ~/.bashrc
+# 또는 수동 설정
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64  # Debian 기준 경로
-# export JAVA_HOME=/usr/lib/jvm/java-21-openjdk      # Oracle Linux 기준 경로
+# export JAVA_HOME=/usr/lib/jvm/java-21-openjdk        # Oracle Linux 기준 경로
 
 # 5. 서버 실행 (local 프로필 = H2 인메모리 DB)
 ./gradlew bootRun --no-daemon
@@ -242,7 +308,7 @@ nohup java -jar build/libs/speechapp-0.0.1-SNAPSHOT.jar > logs/app.log 2>&1 &
 
 ---
 
-### 5. 서버 상태 확인 및 종료
+### 6. 서버 상태 확인 및 종료
 
 ```bash
 # 서버 프로세스 확인
@@ -263,11 +329,16 @@ kill -9 <PID>
 
 ---
 
-### 6. API Health Check
+### 7. API Health Check
 
 ```bash
 # 인증 API 테스트 (Firebase ID Token 없이 — 에러 응답 확인용)
 curl -X POST http://localhost:8080/api/v1/auth/firebase \
+  -H "Content-Type: application/json" \
+  -d '{"id_token":"test"}'
+
+# 외부에서 VM IP로 접속 (방화벽 개방 후)
+curl -X POST http://{VM_IP}:8080/api/v1/auth/firebase \
   -H "Content-Type: application/json" \
   -d '{"id_token":"test"}'
 
@@ -280,7 +351,7 @@ curl -X POST http://localhost:8080/api/v1/auth/firebase \
 
 ---
 
-### 7. 문제 해결
+### 8. 문제 해결
 
 | 증상 | 원인 | 해결 |
 |------|------|------|
@@ -289,6 +360,9 @@ curl -X POST http://localhost:8080/api/v1/auth/firebase \
 | `Firebase Admin SDK 초기화 실패` | `secrets/*.json` 파일 없음 | 시크릿 파일 배치 확인 |
 | `./gradlew: Permission denied` | 실행 권한 없음 | `chmod +x gradlew` |
 | `BindException: 주소가 이미 사용 중입니다` | 이미 다른 서버가 8080 사용 중 | 기존 서버 종료 후 재시도 |
+| **외부에서 VM:8080 접속 불가** | **방화벽 미개방** | **OCI Security List 또는 OS 방화벽에서 8080 개방** |
+
+</details>
 
 ---
 
