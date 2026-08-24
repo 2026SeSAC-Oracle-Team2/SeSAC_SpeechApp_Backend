@@ -28,7 +28,7 @@ class AuthController(
     }
 
     @PostMapping("/logout")
-    fun logout(): ResponseEntity<ApiResponse<Nothing>> {
+    fun logout(): ResponseEntity<ApiResponse<Any?>> {
         return ResponseEntity.ok(ApiResponse.success(null))
     }
 }
