@@ -81,12 +81,132 @@ SeSAC_SpeechApp_Backend/
 
 ## 🖥️ 로컬 개발 환경 (VM 서버)
 
-### 필수 설치
+### 1. 필수 설치 요약
 
-- Java JDK 17+ (현재 VM: OpenJDK 21)
-- Gradle (또는 `./gradlew` wrapper 사용)
+| 항목 | 최소 버전 | 비고 |
+|------|-----------|------|
+| Java JDK | 17+ | Spring Boot 3.x 이상 필수 |
+| Gradle | 8.0+ | `./gradlew` wrapper로 대체 가능 |
 
-### 서버 실행법
+---
+
+### 2. Java JDK 설치
+
+#### 방법 A: SDKMAN (모든 Linux 배포 공통 — 권장)
+
+SDKMAN은 배포판에 관계없이 동일한 방법으로 JDK를 설치할 수 있어요.
+
+```bash
+# 1. SDKMAN 설치
+curl -s "https://get.sdkman.io" | bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+
+# 2. 사용 가능한 JDK 목록 확인
+sdk list java
+
+# 3. OpenJDK 21 설치 (Temurin/Eclipse 기반)
+sdk install java 21.0.5-tem
+
+# 4. 기본 JDK 설정
+sdk default java 21.0.5-tem
+
+# 5. 확인
+java -version
+# openjdk version "21.0.5" 2024-10-15
+```
+
+#### 방법 B: OS 패키지 관리자 (배포판별)
+
+**Ubuntu / Debian 계열:**
+
+```bash
+# 1. APT 업데이트
+sudo apt-get update
+
+# 2. OpenJDK 21 설치
+sudo apt-get install -y openjdk-21-jdk
+
+# 3. 설치 확인
+java -version
+javac -version
+
+# 4. JAVA_HOME 설정 (선택, 권장)
+# 설치 경로 확인
+ls /usr/lib/jvm/
+# 예: java-21-openjdk-arm64
+
+echo 'export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64' >> ~/.bashrc
+echo 'export PATH=$JAVA_HOME/bin:$PATH' >> ~/.bashrc
+source ~/.bashrc
+```
+
+> **Debian 13(trixie) 참고:** `openjdk-17-jdk`는 기본 리포지토리에 없을 수 있어요. 대신 `openjdk-21-jdk`를 설치하세요.
+
+**Oracle Linux / RHEL / CentOS / Rocky Linux / AlmaLinux:**
+
+```bash
+# 1. 시스템 업데이트
+sudo dnf update -y
+
+# 2. OpenJDK 21 설치
+sudo dnf install -y java-21-openjdk-devel
+
+# 3. 설치 확인
+java -version
+javac -version
+
+# 4. JAVA_HOME 설정 (선택, 권장)
+# 설치 경로 확인
+ls /usr/lib/jvm/
+# 예: java-21-openjdk
+
+echo 'export JAVA_HOME=/usr/lib/jvm/java-21-openjdk' >> ~/.bashrc
+echo 'export PATH=$JAVA_HOME/bin:$PATH' >> ~/.bashrc
+source ~/.bashrc
+```
+
+> **Oracle Linux 참고:** `dnf`가 없으면 `yum`을 사용하세요. (`sudo yum install -y java-21-openjdk-devel`)
+
+---
+
+### 3. Gradle 설치
+
+Gradle은 **Gradle Wrapper**(`./gradlew`)를 사용하면 별도 설치 없이도 빌드가 가능해요. 단, wrapper를 사용하려면 Java JDK가 먼저 설치되어 있어야 합니다.
+
+#### 방법 A: Gradle Wrapper 사용 (권장 — 프로젝트에 포함됨)
+
+이 프로젝트에는 이미 Gradle Wrapper가 포함되어 있어요. JDK만 설치하면 바로 사용 가능합니다.
+
+```bash
+# JDK 설치 후 바로 사용
+./gradlew --version
+```
+
+#### 방법 B: Gradle CLI 직접 설치
+
+SDKMAN으로 설치 (모든 Linux 공통):
+
+```bash
+# SDKMAN이 이미 설치되어 있다면
+sdk install gradle 8.10
+
+# 확인
+gradle --version
+```
+
+OS 패키지 관리자로 설치 (선택):
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install -y gradle
+
+# Oracle Linux / RHEL
+sudo dnf install -y gradle
+```
+
+---
+
+### 4. 서버 실행법
 
 ```bash
 # 1. 레포 clone (처음 한 번)
@@ -96,33 +216,78 @@ cd SeSAC_SpeechApp_Backend
 # 2. 브랜치 체크아웃 (인증 API 브랜치)
 git checkout feature/auth-api
 
-# 3. 시크릿 파일 배치 (root로 먼저 복사)
+# 3. 시크릿 파일 배치 (root 권한으로 직접 복사 필요)
 #    - secrets/sesac-teamproject-firebase-adminsdk-fbsvc-*.json
-#    - .env
-#    - .oci/
+#    - .env (JWT_SECRET 등)
+#    - .oci/ (OCI Object Storage용)
+#
+#    예시:
+#    sudo cp /백업경로/firebase-adminsdk.json secrets/
+#    sudo cp /백업경로/.env .
+#    sudo cp -r /백업경로/.oci .
+#    sudo chown -R $(whoami):$(whoami) secrets/ .env .oci/
 
-# 4. 서버 실행 (local 프로필 = H2 인메모리 DB)
-export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
+# 4. JAVA_HOME 환경변수 설정 (아직 설정 안 했다면)
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64  # Debian 기준 경로
+# export JAVA_HOME=/usr/lib/jvm/java-21-openjdk      # Oracle Linux 기준 경로
+
+# 5. 서버 실행 (local 프로필 = H2 인메모리 DB)
 ./gradlew bootRun --no-daemon
 
-# 또는 빌드 후 JAR 실행
+# 또는 빌드 후 JAR 직접 실행 (백그라운드)
 ./gradlew build --no-daemon
-java -jar build/libs/speechapp-0.0.1-SNAPSHOT.jar
+nohup java -jar build/libs/speechapp-0.0.1-SNAPSHOT.jar > logs/app.log 2>&1 &
 ```
 
-### 서버 확인
+---
+
+### 5. 서버 상태 확인 및 종료
 
 ```bash
-# Health check
-curl http://localhost:8080/api/v1/auth/firebase \
-  -X POST \
+# 서버 프로세스 확인
+ps aux | grep speechapp
+ps aux | grep java | grep 8080
+
+# 포트 점유 확인
+lsof -i :8080        # 또는
+ss -tlnp | grep 8080 # 또는
+netstat -tlnp | grep 8080
+
+# 서버 종료 (프로세스 ID 확인 후)
+kill <PID>
+
+# 강제 종료
+kill -9 <PID>
+```
+
+---
+
+### 6. API Health Check
+
+```bash
+# 인증 API 테스트 (Firebase ID Token 없이 — 에러 응답 확인용)
+curl -X POST http://localhost:8080/api/v1/auth/firebase \
   -H "Content-Type: application/json" \
   -d '{"id_token":"test"}'
 
 # H2 Console (개발용 DB 조회)
-# http://localhost:8080/h2-console
+# 브라우저에서: http://localhost:8080/h2-console
 # JDBC URL: jdbc:h2:mem:speechapp
+# User: sa
+# Password: (비워둠)
 ```
+
+---
+
+### 7. 문제 해결
+
+| 증상 | 원인 | 해결 |
+|------|------|------|
+| `java: 명령어를 찾을 수 없음` | JDK 미설치 또는 PATH 미등록 | `sudo apt-get install openjdk-21-jdk` + `export JAVA_HOME=...` |
+| `port 8080 already in use` | 이전 서버 프로세스가 남아있음 | `lsof -i :8080` → `kill -9 <PID>` |
+| `Firebase Admin SDK 초기화 실패` | `secrets/*.json` 파일 없음 | 시크릿 파일 배치 확인 |
+| `./gradlew: Permission denied` | 실행 권한 없음 | `chmod +x gradlew` |
+| `BindException: 주소가 이미 사용 중입니다` | 이미 다른 서버가 8080 사용 중 | 기존 서버 종료 후 재시도 |
 
 ---
 
