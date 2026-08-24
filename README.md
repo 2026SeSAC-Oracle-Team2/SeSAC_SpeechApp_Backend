@@ -105,10 +105,11 @@ source "$HOME/.sdkman/bin/sdkman-init.sh"
 sdk list java
 
 # 3. OpenJDK 21 설치 (Temurin/Eclipse 기반)
-sdk install java 21.0.5-tem
+#    아래 버전은 예시 — 실제 최신 버전은 `sdk list java`로 확인 후 설치
+sdk install java 21.0.12-tem
 
 # 4. 기본 JDK 설정
-sdk default java 21.0.5-tem
+sdk default java 21.0.12-tem
 
 # 5. 확인
 java -version
