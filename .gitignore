@@ -23,9 +23,9 @@ secrets/*.json
 # Gradle / 빌드
 build/
 .gradle/
-gradle/
-gradlew
-gradlew.bat
+# gradle/              ← wrapper 포함 (주석 처리)
+# gradlew            ← wrapper 스크립트 포함
+# gradlew.bat        ← wrapper 스크립트 포함
 *.jar
 *.war
 *.ear
