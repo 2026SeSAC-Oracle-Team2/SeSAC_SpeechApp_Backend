@@ -32,6 +32,7 @@ class FirebaseAuthUtil(
             }
         } catch (e: Exception) {
             logger.error("Firebase Admin SDK 초기화 실패: ${e.message}", e)
+            throw e
         }
     }
 
