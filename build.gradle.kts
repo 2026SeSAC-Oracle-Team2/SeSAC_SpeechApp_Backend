@@ -34,6 +34,9 @@ dependencies {
 	// Firebase Admin SDK
 	implementation("com.google.firebase:firebase-admin:9.4.3")
 
+	// google-http-client 버전 강제 (GZIP 디코딩 버그 회피)
+	implementation("com.google.http-client:google-http-client:1.44.2")
+
 	// JWT (jjwt)
 	implementation("io.jsonwebtoken:jjwt-api:0.12.6")
 	runtimeOnly("io.jsonwebtoken:jjwt-impl:0.12.6")
