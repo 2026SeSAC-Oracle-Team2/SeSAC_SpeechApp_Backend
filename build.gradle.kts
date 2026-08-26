@@ -32,7 +32,7 @@ dependencies {
 	implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
 
 	// Firebase Admin SDK
-	implementation("com.google.firebase:firebase-admin:9.4.3")
+	implementation("com.google.firebase:firebase-admin:9.9.0")
 
 	// google-http-client 버전 강제 (GZIP 디코딩 버그 회피)
 	implementation("com.google.http-client:google-http-client:1.44.2")
