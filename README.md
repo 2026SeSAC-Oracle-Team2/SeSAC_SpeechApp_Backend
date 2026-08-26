@@ -426,5 +426,5 @@ curl -X POST http://{VM_IP}:8080/api/v1/auth/firebase \
 
 | 날짜 | 변경 내용 | 작성자 |
 |------|-----------|--------|
-| 2026-08-24 | Spring Boot 프로젝트 초기화, 인증 API 완성 | Hermes (Agent) |
+| 2026-08-24 | Spring Boot 프로젝트 초기화, 인증 API 완성 | 김윤혁 |
 
