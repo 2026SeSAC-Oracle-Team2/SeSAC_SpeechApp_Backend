@@ -52,7 +52,7 @@ class AuthService(
                 nickname = user.profile?.nickname,
                 profileImageUrl = user.profile?.profileImageUrl,
                 level = 1,
-                createdAt = user.createdAt?.let { Instant.from(it) }
+                createdAt = user.createdAt?.atZone(java.time.ZoneId.systemDefault())?.toInstant()
             ),
             isNewUser = isNewUser
         )
