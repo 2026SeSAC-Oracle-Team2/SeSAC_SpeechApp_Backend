@@ -40,7 +40,10 @@ class FirebaseAuthUtil(
         return try {
             FirebaseAuth.getInstance().verifyIdToken(idToken)
         } catch (e: FirebaseAuthException) {
-            logger.error("Firebase ID Token 검증 실패: ${e.message}")
+            logger.error("Firebase ID Token 검증 실패 — errorCode=${e.errorCode}, message=${e.message}, tokenPreview=${idToken.take(50)}...")
+            null
+        } catch (e: Exception) {
+            logger.error("Firebase ID Token 검증 중 예기치 않은 예외 — type=${e.javaClass.simpleName}, message=${e.message}")
             null
         }
     }
