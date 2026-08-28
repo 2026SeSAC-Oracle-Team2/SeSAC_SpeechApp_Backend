@@ -21,6 +21,7 @@ class UserProfile(
     var nickname: String? = null,
 
     // OCI Object Storage 오브젝트 키만 저장 (예: {userUUID}/profile.jpg) — BE-DB-04
+    // DDL 기준: profile_image_bucket_path (2026-08-28 레포 DDL 정합. DB 컬럼 rename 완료)
     @Column(name = "profile_image_bucket_path", length = 500)
     var profileImageBucketPath: String? = null,
 

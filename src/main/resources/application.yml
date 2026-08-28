@@ -86,6 +86,11 @@ spring:
   config:
     activate:
       on-profile: "local | dev | prod"
+  servlet:
+    multipart:
+      # 프로필 이미지 업로드 표준 제한 (Spring Boot 표준 프로퍼티)
+      max-file-size: 5MB
+      max-request-size: 5MB
 
 firebase:
   admin-sdk-path: secrets/sesac-teamproject-firebase-adminsdk-fbsvc-c891d92201.json
@@ -103,5 +108,3 @@ oci:
     region: ${OCI_REGION:ap-seoul-1}
     config-path: ${OCI_CONFIG_PATH:~/.oci/config}
     config-profile: DEFAULT
-  upload:
-    max-size: 5MB

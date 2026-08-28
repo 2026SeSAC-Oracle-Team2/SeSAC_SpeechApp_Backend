@@ -48,6 +48,13 @@ dependencies {
 
 
 
+	// OCI Object Storage SDK — 버전은 oci-java-sdk-common(코어)이 전이적으로 일괄 관리
+	implementation("com.oracle.oci.sdk:oci-java-sdk-objectstorage:3.95.0")
+	implementation("com.oracle.oci.sdk:oci-java-sdk-common-httpclient-jersey3:3.95.0")
+
+	// 파일 업로드 크기 제한 검증용
+	implementation("org.springframework.boot:spring-boot-starter-validation")
+
 	// DevTools
 	developmentOnly("org.springframework.boot:spring-boot-devtools")
 
@@ -71,4 +78,6 @@ allOpen {
 
 tasks.withType<Test> {
 	useJUnitPlatform()
+	// -Docitest=true 로 실행한 경우에만 수동 OCI 테스트가 활성화되도록 시스템 프로퍼티 전달
+	systemProperty("ocitest", System.getProperty("ocitest"))
 }
