@@ -6,7 +6,7 @@ import org.hibernate.annotations.UpdateTimestamp
 import java.time.LocalDateTime
 
 @Entity
-@Table(name = "user_profile")
+@Table(name = "user_profile", schema = "speechapp_user")
 class UserProfile(
 
     @Id
@@ -20,15 +20,16 @@ class UserProfile(
     @Column(name = "nickname", length = 50)
     var nickname: String? = null,
 
-    @Column(name = "profile_image_url", length = 500)
-    var profileImageUrl: String? = null,
+    // OCI Object Storage 오브젝트 키만 저장 (예: {userUUID}/profile.jpg) — BE-DB-04
+    @Column(name = "profile_image_bucket_path", length = 500)
+    var profileImageBucketPath: String? = null,
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     val createdAt: LocalDateTime? = null,
 
     @UpdateTimestamp
-    @Column(name = "updated_at", nullable = false)
+    @Column(name = "updated_at")
     var updatedAt: LocalDateTime? = null
 ) {
     constructor() : this(null, null, null, null)

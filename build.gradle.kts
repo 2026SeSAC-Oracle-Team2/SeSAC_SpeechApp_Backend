@@ -44,7 +44,9 @@ dependencies {
 
 	// Database
 	runtimeOnly("com.h2database:h2")
-	// runtimeOnly("com.oracle.database.jdbc:ojdbc11")  // Oracle — 나중에 활성화
+	runtimeOnly("com.oracle.database.jdbc:ojdbc11")  // Oracle XE (dev/prod)
+
+
 
 	// DevTools
 	developmentOnly("org.springframework.boot:spring-boot-devtools")

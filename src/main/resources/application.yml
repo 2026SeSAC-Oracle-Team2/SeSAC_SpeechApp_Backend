@@ -15,7 +15,12 @@ spring:
     activate:
       on-profile: local
   datasource:
-    url: jdbc:h2:mem:speechapp;MODE=Oracle;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    # H2 Oracle 호환 모드 + SPEECHAPP_USER 스키마 사전 생성.
+    # 엔티티 @Table(schema="speechapp_user")가 소문자 스키마명을 사용하므로
+    # H2에서는 해당 이름으로 스키마를 만들고(따옴표 없는 식별자는 대문자 저장),
+    # 모든 스키마 권한을 부여해 CREATE/DROP이 가능하게 한다.
+    # 검증: local 프로필 기동 시 Hibernate validate/create-drop 정상 통과 (2026-08-28)
+    url: jdbc:h2:mem:speechapp;MODE=Oracle;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;INIT=CREATE SCHEMA IF NOT EXISTS SPEECHAPP_USER\;GRANT ALL ON SCHEMA SPEECHAPP_USER TO SA
     username: sa
     password:
     driver-class-name: org.h2.Driver
@@ -45,9 +50,12 @@ spring:
     activate:
       on-profile: dev
   datasource:
+    # VM 로컬 Oracle XE 컨테이너 (sesac-oracle-db, XEPDB1)
+    # 계정: speechapp_app (스키마 소유자 speechapp_user의 테이블에 대한 권한 부여됨)
+    # 자격증명은 VM ~/app/.env 의 ORACLE_USER / ORACLE_PASSWORD 로만 주입 (커밋 금지)
     url: jdbc:oracle:thin:@localhost:1521/XEPDB1
-    username: ${ORACLE_USER}
-    password: ${ORACLE_PASSWORD}
+    username: ${ORACLE_USER:}
+    password: ${ORACLE_PASSWORD:}
     driver-class-name: oracle.jdbc.OracleDriver
   jpa:
     hibernate:
@@ -86,3 +94,14 @@ jwt:
   secret: ${JWT_SECRET:SeSAC-SpeechApp-Local-Secret-Key-2026-Change-For-Production}
   access-token-expiration: 900000       # 15분 (ms)
   refresh-token-expiration: 604800000   # 7일 (ms)
+
+
+oci:
+  objectstorage:
+    namespace: ${OCI_STORAGE_NAMESPACE:cn5brhz58dgr}
+    bucket: ${OCI_STORAGE_BUCKET:bucket-team545-userfiles}
+    region: ${OCI_REGION:ap-seoul-1}
+    config-path: ${OCI_CONFIG_PATH:~/.oci/config}
+    config-profile: DEFAULT
+  upload:
+    max-size: 5MB

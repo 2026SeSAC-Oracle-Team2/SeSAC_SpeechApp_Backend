@@ -50,7 +50,7 @@ class AuthService(
                 uuid = user.uuid,
                 email = user.email,
                 nickname = user.profile?.nickname,
-                profileImageUrl = user.profile?.profileImageUrl,
+                profileImageUrl = user.profile?.profileImageBucketPath,
                 level = 1,
                 createdAt = user.createdAt?.atZone(java.time.ZoneId.systemDefault())?.toInstant()
             ),
