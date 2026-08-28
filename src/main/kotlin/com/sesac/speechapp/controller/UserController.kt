@@ -1,16 +1,28 @@
 package com.sesac.speechapp.controller
 
-import com.sesac.speechapp.dto.*
+import com.sesac.speechapp.dto.ApiResponse
+import com.sesac.speechapp.dto.UserDto
+import com.sesac.speechapp.dto.UpdateProfileRequest
+import com.sesac.speechapp.service.ObjectStorageService
 import com.sesac.speechapp.service.UserService
+import org.slf4j.LoggerFactory
+import org.springframework.core.io.ByteArrayResource
+import org.springframework.http.CacheControl
+import org.springframework.http.HttpStatus
+import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.web.bind.annotation.*
+import org.springframework.web.multipart.MultipartFile
+import java.time.Duration
 
 @RestController
 @RequestMapping("/api/v1/users")
 class UserController(
-    private val userService: UserService
+    private val userService: UserService,
+    private val objectStorageService: ObjectStorageService
 ) {
+    private val logger = LoggerFactory.getLogger(UserController::class.java)
 
     @GetMapping("/me")
     fun getMyProfile(
@@ -27,5 +39,89 @@ class UserController(
     ): ResponseEntity<ApiResponse<UserDto>> {
         val result = userService.updateProfile(userUuid, request)
         return ResponseEntity.ok(ApiResponse.success(result))
+    }
+
+    /**
+     * 회원탈퇴 — DB hard delete + Firebase 계정 삭제.
+     */
+    @DeleteMapping("/me")
+    fun withdrawMe(
+        @AuthenticationPrincipal userUuid: String
+    ): ResponseEntity<ApiResponse<Void?>> {
+        userService.withdraw(userUuid)
+        return ResponseEntity.ok(ApiResponse.success(null))
+    }
+
+    /**
+     * 프로필 사진 업로드 (multipart, jpg/png/webp, 최대 5MB).
+     * 저장 키: {userUUID}/profile.{ext} — 사용자당 1개(덮어쓰기).
+     */
+    @PostMapping("/me/profile-image", consumes = [MediaType.MULTIPART_FORM_DATA_VALUE])
+    fun uploadProfileImage(
+        @AuthenticationPrincipal userUuid: String,
+        @RequestParam("file") file: MultipartFile
+    ): ResponseEntity<ApiResponse<UserDto>> {
+        logger.info(
+            "프로필 이미지 업로드 요청: uuid={}, originalName={}, size={}",
+            userUuid, file.originalFilename, file.size
+        )
+
+        // 1) 파일 존재/비어있음 검증
+        if (file.isEmpty) {
+            return ResponseEntity.badRequest().body(
+                ApiResponse.error("INVALID_FILE", "업로드된 파일이 없습니다.")
+            )
+        }
+
+        // 2) 확장자 검증 (jpg/png/webp) — application.yml 표준 multipart 제한(5MB)과 함께 동작
+        val extension = ObjectStorageService.extractImageExtension(file.originalFilename)
+            ?: return ResponseEntity.badRequest().body(
+                ApiResponse.error(
+                    "INVALID_FILE_TYPE",
+                    "지원하지 않는 파일 형식입니다. (허용: jpg, png, webp)"
+                )
+            )
+
+        // 3) OCI 업로드
+        val objectKey = objectStorageService.buildProfileKey(userUuid, extension)
+        val contentType = ObjectStorageService.SUPPORTED_IMAGE_TYPES[extension]!!
+        objectStorageService.uploadObject(objectKey, file.bytes, contentType)
+
+        // 4) DB에 키 저장 (신규 가입 직후 profile이 없으면 생성)
+        val user = userService.getMyProfileEntity(userUuid)
+        val profile = user.profile ?: userService.ensureProfile(user)
+        profile.profileImageBucketPath = objectKey
+        val saved = userService.updateProfileImagePath(userUuid, objectKey)
+
+        logger.info("프로필 이미지 업로드 완료: uuid={}, key={}", userUuid, objectKey)
+        return ResponseEntity.ok(ApiResponse.success(saved))
+    }
+
+    /**
+     * 프로필 사진 조회 — 버킷은 비공개이므로 백엔드가 프록시 스트리밍한다.
+     */
+    @GetMapping("/me/profile-image")
+    fun getProfileImage(
+        @AuthenticationPrincipal userUuid: String
+    ): ResponseEntity<*> {
+        val user = userService.getMyProfileEntity(userUuid)
+        val objectKey = user.profile?.profileImageBucketPath
+            ?: return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                ApiResponse.error<ByteArrayResource>(
+                    "PROFILE_IMAGE_NOT_FOUND",
+                    "등록된 프로필 사진이 없습니다."
+                )
+            )
+
+        val response = objectStorageService.getObject(objectKey)
+        val bytes = response.inputStream.use { it.readBytes() }
+        val contentType = ObjectStorageService.SUPPORTED_IMAGE_TYPES.entries
+            .firstOrNull { objectKey.endsWith(".${it.key}") }?.value
+            ?: MediaType.APPLICATION_OCTET_STREAM_VALUE
+
+        return ResponseEntity.ok()
+            .contentType(MediaType.parseMediaType(contentType))
+            .cacheControl(CacheControl.maxAge(Duration.ofSeconds(60)))
+            .body(ByteArrayResource(bytes))
     }
 }
