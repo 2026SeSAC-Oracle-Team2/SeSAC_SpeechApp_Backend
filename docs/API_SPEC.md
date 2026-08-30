@@ -308,7 +308,8 @@ Authorization: Bearer eyJhbG...NiIs...
      Body: { "id_token": "..." }
   3. 응답: access_token, refresh_token, user.uuid, is_new_user
   4. 토큰 저장 (EncryptedSharedPreferences 권장)
-  5. 메인 화면 진입
+  5. 분기: is_new_user == true 또는 user.nickname == null → 회원가입 화면
+     그 외 → 메인 화면
 ```
 
 ### 4.2 API 호출 시 인증
@@ -316,7 +317,7 @@ Authorization: Bearer eyJhbG...NiIs...
 모든 인증 필요 API에 다음 헤더 포함:
 
 ```
-Authorization: Bearer {access_token}
+Authorization: Bearer ***
 ```
 
 ### 4.3 토큰 만료 처리
@@ -330,7 +331,121 @@ API 호출 → 401 응답
 
 ---
 
-## 5. 향후 추가 예정 API
+## 5. 신규 API (v1.1, 2026-08-28)
+
+### 5.1 회원탈퇴
+
+| 항목 | 내용 |
+|------|------|
+| **Method** | `DELETE` |
+| **Path** | `/api/v1/users/me` |
+| **인증** | Bearer JWT (본인 계정만) |
+
+#### 동작
+
+1. DB에서 `USER_PROFILE` → `APP_USER` 순서 hard delete (FK 순서)
+2. DB 삭제 **성공 후** Firebase Auth 유저도 Admin SDK로 삭제 (firebase_uid 기준). Firebase 삭제 실패는 로그만 남기고 진행 (DB 삭제는 되돌릴 수 없음)
+
+#### 응답 (성공)
+
+```json
+{
+  "success": true,
+  "data": null,
+  "error": null,
+  "timestamp": "2026-08-28T07:45:00.123Z"
+}
+```
+
+> **Android 연동:** 호출 성공 후 Firebase `currentUser.delete()` → 로컬 토큰 삭제 → LoginActivity 이동
+
+---
+
+### 5.2 프로필 사진 업로드
+
+| 항목 | 내용 |
+|------|------|
+| **Method** | `POST` |
+| **Path** | `/api/v1/users/me/profile-image` |
+| **인증** | Bearer JWT |
+| **Content-Type** | `multipart/form-data` |
+
+#### 요청
+
+- 필드명: `file`
+- 허용 형식: jpg / png / webp
+- 최대 크기: 5MB (초과 시 서버에서 거부)
+
+#### 동작
+
+1. OCI Object Storage `bucket-team545-userfiles`에 `{userUUID}/profile.{ext}`로 업로드
+2. DB `USER_PROFILE.profile_image_bucket_path`에 **오브젝트 키만** 저장 (버킷명 제외)
+
+#### 응답 (성공)
+
+```json
+{
+  "success": true,
+  "data": {
+    "uuid": "...",
+    "email": "user@example.com",
+    "nickname": "홍길동",
+    "profileImageUrl": "{userUUID}/profile.jpg",
+    "level": 1,
+    "createdAt": "..."
+  },
+  "timestamp": "..."
+}
+```
+
+#### 응답 (실패 — 형식 오류)
+
+```json
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "INVALID_FILE_TYPE",
+    "message": "jpg/png/webp 형식만 업로드할 수 있습니다.",
+    "detail": null
+  }
+}
+```
+
+---
+
+### 5.3 프로필 사진 조회 (프록시 스트리밍)
+
+| 항목 | 내용 |
+|------|------|
+| **Method** | `GET` |
+| **Path** | `/api/v1/users/me/profile-image` |
+| **인증** | Bearer JWT |
+
+#### 응답 (성공)
+
+- Body: 이미지 바이트 (`image/jpeg` | `image/png` | `image/webp`)
+- 헤더: `Cache-Control: max-age=60`
+
+#### 응답 (미등록)
+
+```json
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "PROFILE_IMAGE_NOT_FOUND",
+    "message": "프로필 사진이 등록되지 않았습니다.",
+    "detail": null
+  }
+}
+```
+
+> ⚠️ **버킷은 비공개**이며 이미지는 이 엔드포인트를 통해서만 제공됨. 클라이언트는 이 URL을 직접 로드하되 Authorization 헤더 필요 (Coil OkHttp 인터셉터 방식). 캐시 무효화가 필요하면 URL 뒤에 `?v={updatedAt}` 쿼리 추가
+
+---
+
+## 6. 향후 추가 예정 API
 
 | 엔드포인트 | 메서드 | 설명 | 예정 단계 |
 |-----------|--------|------|----------|
@@ -345,7 +460,7 @@ API 호출 → 401 응답
 
 ---
 
-## 6. 테스트 샘플
+## 7. 테스트 샘플
 
 ### cURL 예시
 
@@ -357,13 +472,26 @@ curl -X POST http://localhost:8080/api/v1/auth/firebase \
 
 # 2. 프로필 조회 (로그인 후 받은 access_token 사용)
 curl http://localhost:8080/api/v1/users/me \
-  -H "Authorization: Bearer eyJhbG..."
+  -H "Authorization: Bearer ***"
 
 # 3. 프로필 수정
 curl -X PATCH http://localhost:8080/api/v1/users/me \
-  -H "Authorization: Bearer eyJhbG..." \
+  -H "Authorization: Bearer ***" \
   -H "Content-Type: application/json" \
   -d '{"nickname":"새닉네임"}'
+
+# 4. 프로필 사진 업로드
+curl -X POST http://localhost:8080/api/v1/users/me/profile-image \
+  -H "Authorization: Bearer ***" \
+  -F "file=@/path/to/profile.jpg"
+
+# 5. 프로필 사진 조회 (바이너리)
+curl http://localhost:8080/api/v1/users/me/profile-image \
+  -H "Authorization: Bearer ***" -o profile.jpg
+
+# 6. 회원탈퇴
+curl -X DELETE http://localhost:8080/api/v1/users/me \
+  -H "Authorization: Bearer ***"
 ```
 
 ---
@@ -373,3 +501,4 @@ curl -X PATCH http://localhost:8080/api/v1/users/me \
 | 버전 | 날짜 | 변경 내용 |
 |------|------|-----------|
 | v1.0 | 2026-08-24 | 인증 API (Firebase 로그인, 토큰 갱신, 로그아웃, 사용자 프로필 조회/수정) |
+| v1.1 | 2026-08-28 | 회원탈퇴 (DELETE /users/me — DB hard delete + Firebase Auth 삭제), 프로필 사진 업로드/조회 (OCI Object Storage 연동, 프록시 스트리밍). 로그인 흐름에 is_new_user/nickname 분기 추가. 응답 필드명은 camelCase (uuid, profileImageUrl, createdAt) — 실측 검증 완료 |

@@ -12,7 +12,8 @@ class AuthResponse(
 
 class UserDto(
     val uuid: String,
-    val email: String,
+    // 소셜 가입 확장에 따라 email은 nullable (AppUser.email nullable 정합성)
+    val email: String?,
     val nickname: String?,
     val profileImageUrl: String?,
     val level: Int = 1,
