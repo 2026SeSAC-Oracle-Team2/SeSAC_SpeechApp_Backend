@@ -47,6 +47,7 @@ class AuthService(
             refreshToken = refreshToken,
             expiresIn = 900,
             user = UserDto(
+                id = user.id ?: -1L,
                 uuid = user.uuid,
                 email = user.email,
                 nickname = user.profile?.nickname,

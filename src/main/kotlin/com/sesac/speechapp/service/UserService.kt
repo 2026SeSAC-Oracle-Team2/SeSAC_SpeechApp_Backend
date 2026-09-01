@@ -113,6 +113,7 @@ class UserService(
     }
 
     fun toDto(user: AppUser): UserDto = UserDto(
+        id = user.id ?: -1L,
         uuid = user.uuid,
         email = user.email,
         nickname = user.profile?.nickname,
