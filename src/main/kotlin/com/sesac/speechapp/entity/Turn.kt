@@ -50,9 +50,12 @@ class Turn(
     @Column(name = "hints_shown")
     val hintsShown: Int? = null,
 
+    @Column(name = "score", nullable = true, precision = 5, scale = 2)
+    val score: java.math.BigDecimal? = null,
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     val createdAt: LocalDateTime? = null
 ) {
-    constructor() : this(sessionId = 0L, turnNumber = 0, contentType = "")
+    constructor() : this(sessionId = 0L, turnNumber = 0, contentType = "", score = null)
 }
