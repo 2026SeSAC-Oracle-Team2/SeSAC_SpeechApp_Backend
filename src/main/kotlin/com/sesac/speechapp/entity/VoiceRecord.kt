@@ -5,6 +5,7 @@ import jakarta.persistence.Entity
 import jakarta.persistence.GeneratedValue
 import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
+import jakarta.persistence.SequenceGenerator
 import jakarta.persistence.Table
 import org.hibernate.annotations.CreationTimestamp
 import java.time.LocalDateTime
@@ -14,7 +15,8 @@ import java.time.LocalDateTime
 class VoiceRecord(
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "voiceRecordSeq")
+    @SequenceGenerator(name = "voiceRecordSeq", sequenceName = "voice_record_seq", schema = "speechapp_user", allocationSize = 1)
     val id: Long? = null,
 
     @Column(name = "user_id", nullable = false)

@@ -5,17 +5,19 @@ import jakarta.persistence.Entity
 import jakarta.persistence.GeneratedValue
 import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
+import jakarta.persistence.SequenceGenerator
 import jakarta.persistence.Table
 import org.hibernate.annotations.CreationTimestamp
 import org.hibernate.annotations.UpdateTimestamp
 import java.time.LocalDateTime
 
 @Entity
-@Table(name = "session", schema = "speechapp_user")
+@Table(name = "learning_session", schema = "speechapp_user")
 class Session(
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "sessionSeq")
+    @SequenceGenerator(name = "sessionSeq", sequenceName = "session_seq", schema = "speechapp_user", allocationSize = 1)
     val id: Long? = null,
 
     @Column(name = "user_id", nullable = false)

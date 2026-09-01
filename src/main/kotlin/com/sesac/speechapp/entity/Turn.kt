@@ -5,6 +5,7 @@ import jakarta.persistence.Entity
 import jakarta.persistence.GeneratedValue
 import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
+import jakarta.persistence.SequenceGenerator
 import jakarta.persistence.Lob
 import jakarta.persistence.Table
 import org.hibernate.annotations.CreationTimestamp
@@ -15,7 +16,8 @@ import java.time.LocalDateTime
 class Turn(
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "turnSeq")
+    @SequenceGenerator(name = "turnSeq", sequenceName = "turn_seq", schema = "speechapp_user", allocationSize = 1)
     val id: Long? = null,
 
     @Column(name = "session_id", nullable = false)
