@@ -89,8 +89,8 @@ spring:
   servlet:
     multipart:
       # 프로필 이미지 업로드 표준 제한 (Spring Boot 표준 프로퍼티)
-      max-file-size: 5MB
-      max-request-size: 5MB
+      max-file-size: 50MB
+      max-request-size: 50MB
 
 firebase:
   admin-sdk-path: secrets/sesac-teamproject-firebase-adminsdk-fbsvc-c891d92201.json

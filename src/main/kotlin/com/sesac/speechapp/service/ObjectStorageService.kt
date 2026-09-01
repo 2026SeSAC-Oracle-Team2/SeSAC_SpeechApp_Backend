@@ -77,6 +77,12 @@ class ObjectStorageService(
      * 프로필 이미지 표준 키 생성: {userUUID}/profile.{ext}
      * 업로드 시 기존 확장자와 무관하게 덮어쓰기되므로 사용자당 1개 오브젝트만 유지된다.
      */
+    fun buildVoiceKey(userUuid: String, sessionId: Long, turnId: Long, speaker: String): String {
+        val ext = if (speaker == "AI") "mp3" else "m4a"
+        val speakerSuffix = if (speaker == "AI") "_ai" else "_user"
+        return "containers/llm/${userUuid}/${sessionId}/${turnId}${speakerSuffix}.${ext}"
+    }
+
     fun buildProfileKey(userUuid: String, extension: String): String =
         "$userUuid/profile.${extension.lowercase()}"
 
