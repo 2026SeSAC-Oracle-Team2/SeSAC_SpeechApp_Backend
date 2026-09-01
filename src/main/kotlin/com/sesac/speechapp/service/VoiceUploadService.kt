@@ -29,36 +29,39 @@ class VoiceUploadService(
         // 1. 세션 조회 또는 생성
         val session = sessionId?.let { sessionRepository.findById(it).orElseThrow() }
             ?: sessionService.createSession(userId, null)
+        val sessionIdVal = session.id ?: throw IllegalStateException("Session ID is null")
 
         // 2. 턴 생성
-        val turnNumber = turnRepository.countBySessionId(session.id!!).toInt() + 1
+        val turnNumber = turnRepository.countBySessionId(sessionIdVal).toInt() + 1
         val turn = Turn(
-            sessionId = session.id,
+            sessionId = sessionIdVal,
             turnNumber = turnNumber,
             contentType = contentType
         )
         turnRepository.save(turn)
+        val turnIdVal = turn.id ?: throw IllegalStateException("Turn ID is null")
 
         // 3. OCI 업로드
         val user = appUserRepository.findById(userId).orElseThrow()
-        val objectKey = buildVoiceKey(user.uuid, session.id, turn.id!!, "USER")
+        val objectKey = buildVoiceKey(user.uuid, sessionIdVal, turnIdVal, "USER")
         objectStorageService.uploadObject(objectKey, file.bytes, "audio/mp4")
 
         // 4. VOICE_RECORD INSERT
         val voiceRecord = VoiceRecord(
             userId = userId,
-            sessionId = session.id,
-            turnId = turn.id,
+            sessionId = sessionIdVal,
+            turnId = turnIdVal,
             speaker = "USER",
             voiceFilePath = objectKey,
             durationSeconds = null // TODO: 클라이언트에서 duration 전달 또는 서버에서 파싱
         )
         voiceRecordRepository.save(voiceRecord)
+        val voiceRecordIdVal = voiceRecord.id ?: throw IllegalStateException("VoiceRecord ID is null")
 
         return VoiceUploadResult(
-            voiceRecordId = voiceRecord.id!!,
-            turnId = turn.id,
-            sessionId = session.id,
+            voiceRecordId = voiceRecordIdVal,
+            turnId = turnIdVal,
+            sessionId = sessionIdVal,
             filePath = objectKey
         )
     }

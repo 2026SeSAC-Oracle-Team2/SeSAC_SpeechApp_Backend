@@ -8,4 +8,5 @@ import org.springframework.stereotype.Repository
 interface TurnRepository : JpaRepository<Turn, Long> {
     fun findBySessionIdOrderByTurnNumberAsc(sessionId: Long): List<Turn>
     fun findTopBySessionIdOrderByTurnNumberDesc(sessionId: Long): Turn?
+    fun countBySessionId(sessionId: Long): Long
 }
