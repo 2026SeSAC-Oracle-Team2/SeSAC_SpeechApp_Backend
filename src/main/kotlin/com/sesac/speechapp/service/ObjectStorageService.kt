@@ -80,7 +80,7 @@ class ObjectStorageService(
     fun buildVoiceKey(userUuid: String, sessionId: Long, turnId: Long, speaker: String): String {
         val ext = if (speaker == "AI") "mp3" else "m4a"
         val speakerSuffix = if (speaker == "AI") "_ai" else "_user"
-        return "containers/llm/${userUuid}/${sessionId}/${turnId}${speakerSuffix}.${ext}"
+        return "${userUuid}/voice/${sessionId}/${turnId}${speakerSuffix}.${ext}"
     }
 
     fun buildProfileKey(userUuid: String, extension: String): String =
