@@ -86,7 +86,13 @@ class SessionFlowService(
         if (themaRows.isEmpty()) {
             throw IllegalStateException("테마 '$theme'에 등록된 이미지가 없습니다. 관리자 페이지에서 이미지를 등록하세요.")
         }
-        val imageList = themaRows.map { ContainerImageItem(imageId = it.imageId, imageName = "") }
+        // 이미지 이름 포함 (컨테이너가 NAMING 정답 단어로 사용 → 백엔드가 이름→id 리매핑)
+        val poolImages = imageResourceRepository.findAllById(themaRows.map { it.imageId })
+        val imageList = themaRows.mapNotNull { t ->
+            poolImages.firstOrNull { it.imageId == t.imageId }?.let {
+                ContainerImageItem(imageId = t.imageId, imageName = it.imageName)
+            }
+        }
 
         // 4) userInfos + userAQ
         val profile = user.profile
@@ -110,13 +116,16 @@ class SessionFlowService(
             )
         )
 
+        // NAMING 정답 단어(=이미지 이름) → 이미지 id 리매핑용
+        val namingCorrectWords = mutableMapOf<Int, String>()
+
         // 6) problemList → TURN 8행 INSERT (로컬 turnId → turn_number, ADR-006)
         val turnDtos = containerResponse.problemList.mapIndexed { index, problem ->
             val turnNumber = index + 1
             val turn = Turn(
                 sessionId = sessionId,
                 turnNumber = turnNumber,
-                contentType = problem.type.uppercase(),  // listen → LISTEN (seed 코드)
+                contentType = toSeedType(problem.type),  // listen→LISTEN, selfTalk→SELF_TALK
                 status = "PENDING",
                 promptText = problem.passage
             )
@@ -132,8 +141,10 @@ class SessionFlowService(
                     turn.choicesJson = serializeChoices(options)
                 }
                 "naming" -> {
-                    turn.correctValue = problem.perType?.correct as? String
+                    val correctWord = problem.perType?.correct as? String
                         ?: throw IllegalStateException("NAMING 정답 단어 없음 (turnId=${problem.turnId})")
+                    turn.correctValue = correctWord
+                    namingCorrectWords[turnNumber] = correctWord
                 }
                 "shadowing" -> {
                     turn.correctValue = problem.passage  // 원문 = problemContext
@@ -143,11 +154,20 @@ class SessionFlowService(
             turnRepository.save(turn)
             val turnIdVal = turn.id ?: throw IllegalStateException("턴 ID 발급 실패")
 
-            // SELF_TALK → TURN_IMAGE 매핑
-            if (problem.type.lowercase() == "selftalk") {
-                val imageId = problem.perType?.image
-                if (imageId != null) {
-                    turnImageRepository.save(TurnImage(turnId = turnIdVal, imageId = imageId, imageOrder = 1))
+            // 이미지 매핑: SELF_TALK=perType.image / NAMING=정답 단어(이미지 이름) 역조회
+            var namingImageId: Long? = null
+            when (turn.contentType) {
+                "SELF_TALK" -> problem.perType?.image?.let { imgId ->
+                    turnImageRepository.save(TurnImage(turnId = turnIdVal, imageId = imgId, imageOrder = 1))
+                }
+                "NAMING" -> {
+                    val word = namingCorrectWords[turnNumber]
+                    val img = poolImages.firstOrNull { it.imageName == word }
+                    if (img != null) {
+                        val imgId = requireNotNull(img.imageId) { "이미지 ID 누락 (imageName=${img.imageName})" }
+                        turnImageRepository.save(TurnImage(turnId = turnIdVal, imageId = imgId, imageOrder = 1))
+                        namingImageId = imgId
+                    }
                 }
             }
 
@@ -176,8 +196,16 @@ class SessionFlowService(
                 ttsUrl = voiceRecordId?.let { "/api/v1/voice/$it" },
                 passage = problem.passage,
                 choices = if (turn.contentType == "LISTEN") deserializeChoices(turn.choicesJson) else null,
-                imageId = if (turn.contentType == "SELF_TALK") problem.perType?.image else null,
-                imageUrl = if (turn.contentType == "SELF_TALK") problem.perType?.image?.let { "/api/v1/content/images/$it/file" } else null,
+                imageId = when (turn.contentType) {
+                    "SELF_TALK" -> problem.perType?.image
+                    "NAMING" -> namingImageId
+                    else -> null
+                },
+                imageUrl = when (turn.contentType) {
+                    "SELF_TALK" -> problem.perType?.image?.let { "/api/v1/content/images/$it/file" }
+                    "NAMING" -> namingImageId?.let { "/api/v1/content/images/$it/file" }
+                    else -> null
+                },
                 hintAvailable = if (turn.contentType == "NAMING") 2 else null
             )
         }
@@ -525,6 +553,12 @@ class SessionFlowService(
                 )
             }
 
+    /** 컨테이너 소문자 타입 → DB seed 코드 (listen→LISTEN, selfTalk→SELF_TALK) */
+    private fun toSeedType(containerType: String): String = when (containerType.lowercase()) {
+        "selftalk", "self_talk" -> "SELF_TALK"
+        else -> containerType.uppercase()
+    }
+
     private fun toContainerType(seedCode: String): String = when (seedCode) {
         "SELF_TALK" -> "selfTalk"
         else -> seedCode.lowercase()
@@ -577,9 +611,14 @@ class SessionFlowService(
     private fun deserializeChoices(json: String?): List<ChoiceDto>? {
         if (json == null) return null
         return try {
-            val listType = objectMapper.typeFactory
-                .constructCollectionType(List::class.java, ChoiceDto::class.java)
-            objectMapper.readValue(json, listType)
+            val root = objectMapper.readTree(json)
+            root.map { node ->
+                ChoiceDto(
+                    order = node.get("order").asInt(),
+                    mediaType = node.get("mediaType").asText(),
+                    context = node.get("context").asText()
+                )
+            }
         } catch (e: Exception) {
             logger.warn("choices_json 파싱 실패: {}", e.message)
             null

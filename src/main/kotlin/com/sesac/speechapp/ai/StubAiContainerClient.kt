@@ -124,13 +124,14 @@ class StubAiContainerClient : AiContainerClient {
                     )
                 }
                 "naming" -> {
-                    val img = namingImages[namingIdx++ % namingImages.size.coerceAtLeast(1)]
+                    // 계약 §2: naming correct = 이미지 이름 (LLM이 imageList에서 선택)
+                    val img = if (namingImages.isNotEmpty()) namingImages[namingIdx++ % namingImages.size] else null
                     ContainerProblem(
                         turnId = turnId,
                         type = type,
                         ttsPath = ttsPathFor(turnId),
                         passage = "사진 속 사물의 이름을 말해보세요",
-                        perType = ContainerPerType(correct = demoNamingWords.random(rnd))
+                        perType = ContainerPerType(correct = img?.imageName ?: demoNamingWords.random(rnd))
                     )
                 }
                 "shadowing" -> ContainerProblem(
