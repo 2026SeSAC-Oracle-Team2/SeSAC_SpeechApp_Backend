@@ -29,6 +29,10 @@ class Turn(
     @Column(name = "content_type", nullable = false, length = 50)
     val contentType: String,
 
+    // P2-36 (ADR-007): PENDING(출제·미풀이) / SUBMITTED(답안 제출) / SCORED(채점 완료)
+    @Column(name = "status", nullable = false, length = 20)
+    var status: String = "PENDING",
+
     @Lob
     @Column(name = "prompt_text")
     val promptText: String? = null,

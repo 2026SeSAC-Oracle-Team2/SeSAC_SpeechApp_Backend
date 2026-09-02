@@ -3,6 +3,7 @@ package com.sesac.speechapp.entity
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.GeneratedValue
+import jakarta.persistence.Lob
 import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
 import jakarta.persistence.SequenceGenerator
@@ -28,6 +29,34 @@ class Session(
 
     @Column(name = "status", nullable = false, length = 20)
     val status: String = "IN_PROGRESS",
+
+    // P2-36 (ADR-008): 리포트 — 세션 AQ (100점 만점 정수, 리포트 생성 시점에 적재, 전까지 NULL)
+    @Column(name = "aq")
+    var aq: Int? = null,
+
+    @Lob
+    @Column(name = "listen_feedback")
+    var listenFeedback: String? = null,
+
+    @Lob
+    @Column(name = "naming_feedback")
+    var namingFeedback: String? = null,
+
+    @Lob
+    @Column(name = "shadowing_feedback")
+    var shadowingFeedback: String? = null,
+
+    @Lob
+    @Column(name = "self_talk_feedback")
+    var selfTalkFeedback: String? = null,
+
+    @Lob
+    @Column(name = "talk_feedback")
+    var talkFeedback: String? = null,
+
+    @Lob
+    @Column(name = "total_feedback")
+    var totalFeedback: String? = null,
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

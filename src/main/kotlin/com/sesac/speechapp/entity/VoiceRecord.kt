@@ -40,11 +40,12 @@ class VoiceRecord(
     @Column(name = "syllables")
     val syllables: Int? = null,
 
-    @Column(name = "response_time")
-    val responseTime: Int? = null,
+    // P2-36 (ADR-010): RESPONSE_TIME→SPEAKING_TIME, ARTICULATION_RATE→ARTICULATION_TIME rename
+    @Column(name = "speaking_time")
+    val speakingTime: Int? = null,
 
-    @Column(name = "articulation_rate")
-    val articulationRate: Int? = null,
+    @Column(name = "articulation_time")
+    val articulationTime: Int? = null,
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

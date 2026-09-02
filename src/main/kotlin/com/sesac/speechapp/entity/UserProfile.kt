@@ -25,6 +25,16 @@ class UserProfile(
     @Column(name = "profile_image_bucket_path", length = 500)
     var profileImageBucketPath: String? = null,
 
+    // P2-36: AI 컨테이너 userInfos 전달용 (nullable 3종, 2026-09-02 확정)
+    @Column(name = "likes", length = 500)
+    var likes: String? = null,
+
+    @Column(name = "sex", length = 10)
+    var sex: String? = null,
+
+    @Column(name = "age")
+    var age: Int? = null,
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     val createdAt: LocalDateTime? = null,
