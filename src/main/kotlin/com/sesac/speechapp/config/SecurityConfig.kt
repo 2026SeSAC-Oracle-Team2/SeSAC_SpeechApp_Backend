@@ -32,6 +32,7 @@ class SecurityConfig(
                     .requestMatchers("/error").permitAll()
                     .requestMatchers("/api/v1/sessions/**").permitAll()
                     .requestMatchers("/api/v1/voice/**").permitAll()
+                    .requestMatchers("/api/v1/content/**").permitAll()
                     .anyRequest().authenticated()
             }
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter::class.java)
