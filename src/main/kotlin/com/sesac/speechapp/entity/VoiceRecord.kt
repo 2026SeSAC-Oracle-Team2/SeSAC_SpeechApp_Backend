@@ -41,11 +41,12 @@ class VoiceRecord(
     val syllables: Int? = null,
 
     // P2-36 (ADR-010): RESPONSE_TIME→SPEAKING_TIME, ARTICULATION_RATE→ARTICULATION_TIME rename
+    // NUMBER(무precision) 컬럼 — BigDecimal 매핑 (Double→BINARY_DOUBLE 함정 회피)
     @Column(name = "speaking_time")
-    val speakingTime: Int? = null,
+    val speakingTime: java.math.BigDecimal? = null,
 
     @Column(name = "articulation_time")
-    val articulationTime: Int? = null,
+    val articulationTime: java.math.BigDecimal? = null,
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

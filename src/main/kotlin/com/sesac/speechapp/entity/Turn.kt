@@ -39,23 +39,23 @@ class Turn(
 
     @Lob
     @Column(name = "choices_json")
-    val choicesJson: String? = null,
+    var choicesJson: String? = null,
 
     @Column(name = "correct_value", length = 500)
-    val correctValue: String? = null,
+    var correctValue: String? = null,
 
     @Column(name = "selected_value", length = 500)
-    val selectedValue: String? = null,
+    var selectedValue: String? = null,
 
     @Lob
     @Column(name = "answer_text")
-    val answerText: String? = null,
+    var answerText: String? = null,
 
     @Column(name = "hints_shown")
-    val hintsShown: Int? = null,
+    var hintsShown: Int? = null,
 
     @Column(name = "score", nullable = true, precision = 5, scale = 2)
-    val score: java.math.BigDecimal? = null,
+    var score: java.math.BigDecimal? = null,
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

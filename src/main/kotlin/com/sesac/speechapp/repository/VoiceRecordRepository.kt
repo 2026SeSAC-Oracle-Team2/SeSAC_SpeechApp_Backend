@@ -8,4 +8,5 @@ import org.springframework.stereotype.Repository
 interface VoiceRecordRepository : JpaRepository<VoiceRecord, Long> {
     fun findBySessionIdOrderByCreatedAtAsc(sessionId: Long): List<VoiceRecord>
     fun findByTurnId(turnId: Long): List<VoiceRecord>
+    fun findByUserId(userId: Long): List<VoiceRecord>
 }

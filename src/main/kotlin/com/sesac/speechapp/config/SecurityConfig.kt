@@ -30,7 +30,7 @@ class SecurityConfig(
                     .requestMatchers("/api/v1/auth/**").permitAll()
                     .requestMatchers("/h2-console/**").permitAll()
                     .requestMatchers("/error").permitAll()
-                    .requestMatchers("/api/v1/sessions").permitAll()
+                    .requestMatchers("/api/v1/sessions/**").permitAll()
                     .requestMatchers("/api/v1/voice/**").permitAll()
                     .anyRequest().authenticated()
             }

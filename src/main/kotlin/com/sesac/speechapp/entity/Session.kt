@@ -28,7 +28,7 @@ class Session(
     val theme: String? = null,
 
     @Column(name = "status", nullable = false, length = 20)
-    val status: String = "IN_PROGRESS",
+    var status: String = "IN_PROGRESS",
 
     // P2-36 (ADR-008): 리포트 — 세션 AQ (100점 만점 정수, 리포트 생성 시점에 적재, 전까지 NULL)
     @Column(name = "aq")
