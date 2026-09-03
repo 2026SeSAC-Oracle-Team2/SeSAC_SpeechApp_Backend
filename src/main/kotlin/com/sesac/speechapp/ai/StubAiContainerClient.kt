@@ -102,9 +102,16 @@ class StubAiContainerClient : AiContainerClient {
         types.shuffle(rnd)
 
         // NAMING/SELF_TALK에 쓸 이미지 선택 (요청 이미지 풀에서)
+        // B-3: 백엔드가 타입별 조건 필터 부분집합(namingImageIds/selfTalkImageIds)을 동봉하면
+        //      그 안에서만 선택 — cue 없는 이미지가 NAMING 정답으로 출제되는 것을 방지.
+        //      실컨테이너는 필드 미수신(null) 시 imageList 전체에서 LLM 자율 선택 (계약 유지).
         val imagePool = request.imageList.toMutableList()
-        val namingImages = pickImages(imagePool, 2)
-        val selfTalkImages = pickImages(imagePool, 2)
+        val namingIds = request.namingImageIds?.toSet()
+        val selfTalkIds = request.selfTalkImageIds?.toSet()
+        val namingCandidates = imagePool.filter { namingIds == null || it.imageId in namingIds }.toMutableList()
+        val selfTalkCandidates = imagePool.filter { it.imageId in (selfTalkIds ?: emptySet()) }.ifEmpty { imagePool }.toMutableList()
+        val namingImages = pickImages(namingCandidates, 2)
+        val selfTalkImages = pickImages(selfTalkCandidates, 2)
 
         var namingIdx = 0
         var selfTalkIdx = 0
@@ -213,13 +220,21 @@ class StubAiContainerClient : AiContainerClient {
     override fun aichat(request: AiChatRequest): AiChatResponse {
         sleepRandom(1000, 2000, "이야기 턴 생성")
         val isFirst = request.context.isEmpty()
-        val userText = request.context.lastOrNull { it.speaker == "USER" }?.text
+        // B-2: 이번 턴 유저 발화는 호출 시점에 context에 아직 없다 (TURN INSERT는 응답 수신 후).
+        // 실컨테이너는 userVoicePath 음성의 실제 STT 결과를 userText로 반환하므로 구조 변경 불필요 —
+        // 스텁 전용 보정: 음성이 있는 턴(userVoicePath != null)은 더미 STT 텍스트 반환,
+        // 첫 호출(음성 없는 턴)은 03a §6 규약대로 null 유지.
+        val userText = if (request.userVoicePath != null) {
+            dummySttText()
+        } else {
+            null
+        }
         val llmResponse = if (isFirst) {
             aiChatOpeners.random(rnd)
         } else {
             aiChatReplies.random(rnd)
         }
-        logger.info("[StubContainer] aichat: first={}, contextSize={}", isFirst, request.context.size)
+        logger.info("[StubContainer] aichat: first={}, contextSize={}, userText={}", isFirst, request.context.size, userText)
         return AiChatResponse(
             sessionId = request.sessionId,
             userId = request.userId,
@@ -287,6 +302,15 @@ class StubAiContainerClient : AiContainerClient {
         "카페에서.. 친구를 만났어요",
         "아.. 오늘은 날씨가 좋아서 산책을 했어요",
         "음.. 메뉴를 보고 주문했어요"
+    ).random(rnd)
+
+    /** B-2: 이야기 턴 더미 STT 텍스트 — 실컨테이너는 Whisper STT 결과를 반환 (스텁 전용 보정) */
+    private fun dummySttText(): String = listOf(
+        "오늘은 카페에 갔어요",
+        "아침에 커피 한 잔 마셨어요",
+        "친구랑 산책하면서 이야기했어요",
+        "요즘 날씨가 좋아서 기분이 좋아요",
+        "점심 메뉴를 고르는 중이에요"
     ).random(rnd)
 
     private fun sleepRandom(minMs: Int, maxMs: Int, label: String) {
