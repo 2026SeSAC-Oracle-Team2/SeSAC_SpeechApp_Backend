@@ -42,14 +42,15 @@ class UserController(
     }
 
     /**
-     * 회원탈퇴 — DB hard delete + Firebase 계정 삭제.
+     * 회원탈퇴 — DB hard delete(FK 역순, B-1) + OCI 유저 파일 정리 + Firebase 계정 삭제.
+     * 응답 204 No Content (05a §2 계약).
      */
     @DeleteMapping("/me")
     fun withdrawMe(
         @AuthenticationPrincipal userUuid: String
-    ): ResponseEntity<ApiResponse<Void?>> {
+    ): ResponseEntity<Void> {
         userService.withdraw(userUuid)
-        return ResponseEntity.ok(ApiResponse.success(null))
+        return ResponseEntity.noContent().build()
     }
 
     /**
