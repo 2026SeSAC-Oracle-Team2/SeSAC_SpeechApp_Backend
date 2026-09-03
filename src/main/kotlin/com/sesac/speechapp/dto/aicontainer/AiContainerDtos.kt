@@ -30,6 +30,12 @@ data class CreateSessionRequest(
     @JsonProperty("sessionId") val sessionId: Long,
     @JsonProperty("thema") val thema: String,
     @JsonProperty("imageList") val imageList: List<ContainerImageItem>,
+    // B-3: 백엔드가 조건 필터한 타입별 부분집합 (NAMING=SEMANTIC_CUE 보유, SELF_TALK=IMAGE_TAG_PATH 보유).
+    // 실컨테이너는 미제공 시(imageList 전체 풀 수신) LLM 자율 선택 — 기존 계약 유지.
+    @JsonProperty("namingImageIds")
+    val namingImageIds: List<Long>? = null,
+    @JsonProperty("selfTalkImageIds")
+    val selfTalkImageIds: List<Long>? = null,
     @JsonProperty("userID") val userId: Long,
     @JsonProperty("userInfos") val userInfos: ContainerUserInfo,
     @JsonProperty("userAQ") val userAQ: Int? = null

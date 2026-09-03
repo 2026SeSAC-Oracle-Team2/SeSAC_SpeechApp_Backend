@@ -94,6 +94,25 @@ class SessionFlowService(
             }
         }
 
+        // B-3: 타입별 조건 필터 — NAMING=SEMANTIC_CUE 보유, SELF_TALK=IMAGE_TAG_PATH 보유.
+        // 조건 필터는 백엔드 책임 (03 계약서 §2). 타입별로 2개씩(NAMING 2턴 + SELF_TALK 2턴) 필요하다.
+        val namingPool = imageList.filter { img -> poolImages.any { it.imageId == img.imageId && it.semanticCue != null } }
+        val selfTalkPool = imageList.filter { img -> poolImages.any { it.imageId == img.imageId && !it.imageTagPath.isNullOrBlank() } }
+        val requiredPerType = 2  // 각 타입 턴 수 (4타입 × 2회)
+
+        // 완화: 조건 충족 풀이 최소 개수에 못 미치면 조건을 완화한 풀로 폴백 + 경고 로그
+        // (데모 TEST 테마는 이미지 5~6개뿐 — cue만 있고 tag 없는 이미지가 대부분이라 tag 풀 부족이 정상적인 상태).
+        val relaxed = namingPool.size < requiredPerType || selfTalkPool.size < requiredPerType
+        val namingFinal = if (namingPool.size >= requiredPerType) namingPool else imageList
+        val selfTalkFinal = if (selfTalkPool.size >= requiredPerType) selfTalkPool else imageList
+        if (relaxed) {
+            logger.warn(
+                "[B-3] 조건 이미지 풀 부족 — 필터 완화 (namingPool={}, selfTalkPool={}, 전체={}): " +
+                    "NAMING 출제 이미지에 cue 없는 이미지가 포함될 수 있음. 관리자 페이지에서 cue/tag 데이터 보충 권장",
+                namingPool.size, selfTalkPool.size, imageList.size
+            )
+        }
+
         // 4) userInfos + userAQ
         val profile = user.profile
         val userInfos = ContainerUserInfo(
@@ -104,12 +123,14 @@ class SessionFlowService(
         )
         val userAQ = calculateUserAQ(userId)
 
-        // 5) 컨테이너 POST /sessions (스텁 2~3초)
+        // 5) 컨테이너 POST /sessions (스텁 2~3초) — B-3: 타입별 조건 필터 풀 동봉
         val containerResponse = aiContainerClient.createSession(
             CreateSessionRequest(
                 sessionId = sessionId,
                 thema = theme,
                 imageList = imageList,
+                namingImageIds = namingFinal.mapNotNull { it.imageId },
+                selfTalkImageIds = selfTalkFinal.mapNotNull { it.imageId },
                 userId = userId,
                 userInfos = userInfos,
                 userAQ = userAQ
