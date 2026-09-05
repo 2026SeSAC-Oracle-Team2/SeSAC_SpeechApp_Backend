@@ -8,15 +8,17 @@ import com.sesac.speechapp.dto.aicontainer.ContainerImageItem
 import com.sesac.speechapp.dto.aicontainer.ContainerUserInfo
 import com.sesac.speechapp.dto.aicontainer.CreateSessionRequest
 import com.sesac.speechapp.dto.aicontainer.NamingScoreRequest
-import com.sesac.speechapp.dto.aicontainer.ReportRequest
+import com.sesac.speechapp.dto.aicontainer.ProblemsReportRequest
 import com.sesac.speechapp.dto.aicontainer.SelfTalkScoreRequest
 import com.sesac.speechapp.dto.aicontainer.ShadowingScoreRequest
+import com.sesac.speechapp.dto.aicontainer.TotalReportRequest
 import com.sesac.speechapp.dto.aicontainer.TurnResult
 import com.sesac.speechapp.dto.session.ChoiceDto
 import com.sesac.speechapp.dto.session.FeedbacksDto
 import com.sesac.speechapp.dto.session.FinishData
 import com.sesac.speechapp.dto.session.HintData
 import com.sesac.speechapp.dto.session.ListenSubmitData
+import com.sesac.speechapp.dto.session.ListenSubmitRequest
 import com.sesac.speechapp.dto.session.SessionCreateData
 import com.sesac.speechapp.dto.session.TalkData
 import com.sesac.speechapp.dto.session.TurnDto
@@ -33,6 +35,7 @@ import com.sesac.speechapp.repository.ImageThemaRepository
 import com.sesac.speechapp.repository.SessionRepository
 import com.sesac.speechapp.repository.TurnImageRepository
 import com.sesac.speechapp.repository.TurnRepository
+import com.sesac.speechapp.repository.UserRepresentativeScoreRepository
 import com.sesac.speechapp.repository.VoiceRecordRepository
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -41,13 +44,22 @@ import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.multipart.MultipartFile
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 /**
- * "오늘의 학습" 데모 세션 플로우 서비스 (05 문서 §4 + 03 계약서).
+ * 세션 플로우 서비스 (05a §3 + 03a §2·§7 — v1.9 계약 기준).
  *
  * - 테마 랜덤 선택은 `demo.themes` 프로퍼티 (데모: TEST만 — 이미지 등록된 테마만 운영).
- * - 이야기 턴 하드캡: `demo.talk-turn-limit` (데모 3턴).
+ * - 이야기 턴 하드캡: `demo.talk-turn-limit` (기획 확정 8턴 — 유저 8턴째 답변 후 AI 마무리
+ *   응답(9번째)까지 허용, D-5 승인 사안 A: 체크 기준 = 유저 답변 수 기준).
  * - 유저 음성: OCI 업로드 시도 → 실패 시(스텁/오프라인) 논리 경로만 유지하고 계속.
+ *
+ * v1.9 (D-5, 2026-09-06): 세션 2종 분기 (03a §2, P3-31) —
+ * - createSession(userId, sessionType, thema?) — today(테마 랜덤) / theme(thema 고정).
+ * - LEARNING_SESSION type+session_name 세팅, thema 유효성 E0400.
+ * - 리포트 2단계 DTO 반영(generateProblems/generateTotal 동기 2호출 분해 —
+ *   백그라운드 재편·중단/완료 판정은 커밋2). userAQ 캐시 조회는 커밋2 적용.
  */
 @Service
 class SessionFlowService(
@@ -60,35 +72,59 @@ class SessionFlowService(
     private val imageResourceRepository: ImageResourceRepository,
     private val appUserRepository: AppUserRepository,
     private val userProfileRepository: UserProfileRepository,
+    private val userRepresentativeScoreRepository: UserRepresentativeScoreRepository,
     private val userService: UserService,
     private val objectStorageService: ObjectStorageService,
-    @Value("\${demo.talk-turn-limit:3}") private val talkTurnLimit: Int,
+    @Value("\${demo.talk-turn-limit:8}") private val talkTurnLimit: Int,
     @Value("\${demo.themes:TEST}") private val demoThemes: String
 ) {
     private val logger = LoggerFactory.getLogger(SessionFlowService::class.java)
     private val objectMapper = ObjectMapper()
 
     // ============================================================
-    // 4.1 POST /api/v1/sessions — 세션 생성 (8문제 일괄)
+    // [1] POST /api/v1/sessions/today · /theme — 세션 생성 (8문제 일괄)
+    //     v2는 하위호환 유지(클라 데모용) — 동일 내부 로직 호출
     // ============================================================
     @Transactional
-    fun createSession(userId: Long): SessionCreateData {
+    fun createSessionToday(userId: Long): SessionCreateData = createSession(userId, "today", null)
+
+    @Transactional
+    fun createSessionTheme(userId: Long, thema: String): SessionCreateData = createSession(userId, "theme", thema)
+
+    /**
+     * 세션 생성 — 2종 분기 (03a §2, P3-31).
+     * - today: 테마 랜덤 선택(demo.themes) + 무작위 출제(스텁) → 컨테이너 /sessions/today
+     * - theme: 전달받은 thema 고정 → 컨테이너 /sessions/theme
+     *   (시나리오 플로우 데이터는 컨텐츠 팀 미확정 — 스텁 내부는 today와 동일,
+     *    컨테이너 엔드포인트만 분기. 세션명 시나리오명은 컨텐츠 확정 후 교체 TODO(D-8 이후))
+     * - thema 유효성: TEST/HOSPITAL/CAFE 이외 → E0400. IMAGE_THEMA 등록분만 허용
+     *   (등록 없으면 기존 예외 흐름).
+     */
+    @Transactional
+    fun createSession(userId: Long, sessionType: String, thema: String?): SessionCreateData {
         val user = appUserRepository.findById(userId)
             .orElseThrow { IllegalArgumentException("존재하지 않는 사용자입니다: $userId") }
 
-        // 1) 테마 랜덤 선택
-        val theme = demoThemes.split(",").map { it.trim() }.filter { it.isNotEmpty() }.random()
+        // 1) 테마 결정 — today: demo.themes 랜덤 / theme: 파라미터 고정(유효성 검증)
+        val theme = if (sessionType == "today") {
+            demoThemes.split(",").map { it.trim() }.filter { it.isNotEmpty() }.random()
+        } else {
+            val t = thema?.trim().orEmpty()
+            if (t.isEmpty()) throw IllegalArgumentException("테마 학습은 thema 파라미터가 필요합니다 (TEST/HOSPITAL/CAFE)")
+            if (t.uppercase() !in ALLOWED_THEMAS) {
+                throw IllegalArgumentException("허용되지 않는 테마입니다: $t (허용: TEST, HOSPITAL, CAFE)")
+            }
+            t.uppercase()
+        }
 
-        // 2) LEARNING_SESSION INSERT
-        // D-4 [3.1]: type/session_name 세팅 (D-2 잔여 — 컬럼은 D-1에 이미 존재).
-        // type="today" — theme 분기(/sessions/theme)는 D-5, 컬럼과 이름 규약은 지금부터 적재.
-        // sessionName="오늘의 학습 - {테마명}" — 학습 기록 카드 표시명 (04 v2.6 §4.4).
-        // STATUS는 IN_PROGRESS 유지 (COMPLETED_NO_TALK 판정은 D-5).
+        // 2) LEARNING_SESSION INSERT — type=today|theme + session_name (04 v2.6 §4.4).
+        //    시나리오명(SESSION_NAME 확정분)은 컨텐츠 팀 명칭 — 지금은 테마 기반. TODO(D-8 이후): 컨텐츠 확정 후 시나리오명 교체
+        val sessionName = "오늘의 학습 - $theme"
         val session = Session(
             userId = userId,
             theme = theme,
-            type = "today",
-            sessionName = "오늘의 학습 - $theme",
+            type = sessionType,
+            sessionName = sessionName,
             status = "IN_PROGRESS"
         )
         sessionRepository.save(session)
@@ -107,9 +143,8 @@ class SessionFlowService(
             }
         }
 
-        // B-3 → v1.2 계약: 3분할 이미지 풀 (구 imageList+namingImageIds/selfTalkImageIds 폐지).
-        // 분류 규약 (03a §2): IMAGE_TAG_PATH 있음=SELF_TALK / 없음+SEMANTIC_CUE 있음=NAMING / 둘 다 없음=LISTEN.
-        // 조건 필터는 백엔드 책임 (03 계약서 §2). 타입별로 2개씩(NAMING 2턴 + SELF_TALK 2턴) 필요하다.
+        // v1.2 계약: 3분할 이미지 풀 (분류 규약 03a §2: TAG_PATH 있음=SELF_TALK /
+        // 없음+CUE 있음=NAMING / 둘 다 없음=LISTEN). 조건 필터는 백엔드 책임.
         val namingPool = imageList.filter { img -> poolImages.any { it.imageId == img.imageId && it.semanticCue != null && it.imageTagPath.isNullOrBlank() } }
         val selfTalkPool = imageList.filter { img -> poolImages.any { it.imageId == img.imageId && !it.imageTagPath.isNullOrBlank() } }
         val listenPool = imageList.filter { img -> poolImages.any { it.imageId == img.imageId && it.semanticCue == null && it.imageTagPath.isNullOrBlank() } }
@@ -129,37 +164,38 @@ class SessionFlowService(
             )
         }
 
-        // 4) userInfos + userAQ
+        // 4) userInfos + userAQ (v1.7: REP_SCORES.USER_AQ 캐시 직접 조회 — 산정식 실행 없음)
         val profile = user.profile
         val userInfos = ContainerUserInfo(
             nickname = profile?.nickname,
             hobbies = profile?.hobbies,
-            // D-4 [1.2]: USER_PROFILE_TAGS 조립 주입 완성 — UserService.buildTagsString 재사용
-            // (tag_id 오름차순, 쉼표 문자열, N+1 회피 — toDto와 동일 로직으로 일관성)
+            // D-4 [1.2]: USER_PROFILE_TAGS 조립 주입 — UserService.buildTagsString 재사용
             tags = userService.buildTagsString(userId).ifEmpty { null },
             sex = profile?.sex,
             age = profile?.birthDate?.let { calcAge(it) },
             userMemory = profile?.userMemory
         )
-        // v1.7: userAQ 출처 = USER_REPRESENTATIVE_SCORES.USER_AQ 캐시 직접 조회 (백엔드 산정식 실행 없음)
-        val userAQ = calculateUserAQ(userId)
+        val userAQ = userRepresentativeScoreRepository.findByUserId(userId)?.userAq
 
-        // 5) 컨테이너 POST /sessions (스텁 2~3초) — v1.2: 3분할 풀 동봉
-        val containerResponse = aiContainerClient.createSession(
-            CreateSessionRequest(
-                sessionId = sessionId,
-                thema = theme,
-                imageListListening = listenFinal.mapNotNull { it.imageId }
-                    .mapNotNull { id -> imageList.firstOrNull { it.imageId == id } },
-                imageListNaming = namingFinal.mapNotNull { it.imageId }
-                    .mapNotNull { id -> imageList.firstOrNull { it.imageId == id } },
-                imageListSelfTalk = selfTalkFinal.mapNotNull { it.imageId }
-                    .mapNotNull { id -> imageList.firstOrNull { it.imageId == id } },
-                userId = userId,
-                userInfos = userInfos,
-                userAQ = userAQ
-            )
+        // 5) 컨테이너 POST /sessions/today·theme (스텁 2~3초) — v1.2: 3분할 풀 동봉
+        val containerRequest = CreateSessionRequest(
+            sessionId = sessionId,
+            thema = theme,
+            imageListListening = listenFinal.mapNotNull { it.imageId }
+                .mapNotNull { id -> imageList.firstOrNull { it.imageId == id } },
+            imageListNaming = namingFinal.mapNotNull { it.imageId }
+                .mapNotNull { id -> imageList.firstOrNull { it.imageId == id } },
+            imageListSelfTalk = selfTalkFinal.mapNotNull { it.imageId }
+                .mapNotNull { id -> imageList.firstOrNull { it.imageId == id } },
+            userId = userId,
+            userInfos = userInfos,
+            userAQ = userAQ
         )
+        val containerResponse = if (sessionType == "today") {
+            aiContainerClient.createSessionToday(containerRequest)
+        } else {
+            aiContainerClient.createSessionTheme(containerRequest)
+        }
 
         // NAMING 정답 단어(=이미지 이름) → 이미지 id 리매핑용
         val namingCorrectWords = mutableMapOf<Int, String>()
@@ -170,7 +206,7 @@ class SessionFlowService(
             val turn = Turn(
                 sessionId = sessionId,
                 turnNumber = turnNumber,
-                contentType = toSeedType(problem.type),  // v1.4: listenText→LISTEN_TEXT 등 6종, selfTalk→SELF_TALK
+                contentType = toSeedType(problem.type),  // v1.4: listenText→LISTEN_TEXT 등 6종
                 status = "PENDING",
                 promptText = problem.passage
             )
@@ -225,7 +261,7 @@ class SessionFlowService(
                     sessionId = sessionId,
                     turnId = turnIdVal,
                     speaker = "AI",
-                    // 스텁 모드: classpath tts_samples 매핑 (실모드: 공유폴더→리네임→OCI 키)
+                    // B-4 (D-5): 타입별 전용 샘플 매핑 확정 — classpath tts_samples
                     voiceFilePath = "classpath:tts_samples/$stubFile",
                     speakingTime = null,
                     articulationTime = null
@@ -255,8 +291,8 @@ class SessionFlowService(
             )
         }
 
-        logger.info("세션 생성 완료: sessionId={}, theme={}, turns={}", sessionId, theme, turnDtos.size)
-        return SessionCreateData(sessionId = sessionId, theme = theme, turns = turnDtos)
+        logger.info("세션 생성 완료: sessionId={}, type={}, theme={}, turns={}", sessionId, sessionType, theme, turnDtos.size)
+        return SessionCreateData(sessionId = sessionId, theme = theme, type = sessionType, turns = turnDtos)
     }
 
     // ============================================================
@@ -290,14 +326,14 @@ class SessionFlowService(
         val objectKey = objectStorageService.buildVoiceKey(user.uuid, sessionId, turnId, "USER")
         saveUserVoice(objectKey, file)
 
-        val response: com.sesac.speechapp.dto.aicontainer.NamingScoreResponse = aiContainerClient.scoreNaming(
+        val response = aiContainerClient.scoreNaming(
             NamingScoreRequest(
                 sessionId = sessionId,
                 userId = userId,
                 problemContext = turn.correctValue ?: "",
                 userVoicePath = objectKey,
                 hintCount = turn.hintsShown ?: 0,
-                // v1.4: 0개(첫사용)면 0 전송 — 구 null 폐지
+                // v1.4: 0개(첫사용)면 0 전송 — 구 null 폐지. 최근 20개 창 적용 (D-5 [3.2])
                 userRT = calculateUserRT(userId) ?: BigDecimal.ZERO
             )
         )
@@ -313,13 +349,13 @@ class SessionFlowService(
         val objectKey = objectStorageService.buildVoiceKey(user.uuid, sessionId, turnId, "USER")
         saveUserVoice(objectKey, file)
 
-        val response: com.sesac.speechapp.dto.aicontainer.ShadowingScoreResponse = aiContainerClient.scoreShadowing(
+        val response = aiContainerClient.scoreShadowing(
             ShadowingScoreRequest(
                 sessionId = sessionId,
                 userId = userId,
                 problemContext = turn.correctValue ?: turn.promptText ?: "",
                 userVoicePath = objectKey,
-                // v1.4: 조음속도 — 0개(첫사용)면 0 전송. 산정 로직 자체는 D-5 대상
+                // v1.4: 조음속도 — 0개(첫사용)면 0 전송. 최근 20개 창 적용 (D-5 [3.2])
                 articulationRate = calculateArticulationRate(userId) ?: BigDecimal.ZERO
             )
         )
@@ -340,7 +376,7 @@ class SessionFlowService(
         val imageName = imageId?.let { imageResourceRepository.findById(it).orElse(null)?.imageName } ?: ""
         val problemTag = """{"tags": ["사람", "상황", "행동", "$imageName"]}"""
 
-        val response: com.sesac.speechapp.dto.aicontainer.SelfTalkScoreResponse = aiContainerClient.scoreSelfTalk(
+        val response = aiContainerClient.scoreSelfTalk(
             SelfTalkScoreRequest(
                 sessionId = sessionId,
                 userId = userId,
@@ -352,7 +388,7 @@ class SessionFlowService(
         return applyScoredResult(turn, sessionId, userId, objectKey, response.scoreSelfTalk, response.userVoiceEval)
     }
 
-    /** 공통 적재: TURN.score/answer_text + VOICE_RECORD USER 행 */
+    /** 공통 적재: TURN.score/answer_text + VOICE_RECORD USER 행 + 8문제 완료 감지 */
     private fun applyScoredResult(
         turn: Turn,
         sessionId: Long,
@@ -426,7 +462,7 @@ class SessionFlowService(
     }
 
     // ============================================================
-    // 4.5 이야기 턴 (STORYTELLING) — 데모 3턴 하드캡
+    // 4.5 이야기 턴 (STORYTELLING) — 8턴 하드캡 (유저 답변 수 기준, 승인 사안 A)
     // ============================================================
     @Transactional
     fun talk(sessionId: Long, userId: Long, file: MultipartFile?): TalkData {
@@ -436,7 +472,11 @@ class SessionFlowService(
 
         val talkTurns = turnRepository.findBySessionIdOrderByTurnNumberAsc(sessionId)
             .filter { it.contentType == "STORYTELLING" }
-        if (talkTurns.size >= talkTurnLimit) {
+        // 승인 사안 A: 하드캡 체크를 유저 답변 수 기준으로 — 유저 8턴째 답변 이후엔
+        // AI 마무리 응답(9번째)까지 생성 허용 (03 계약서 §9.3 "8턴 하드캡 = 유저 8턴
+        // 답변 후 AI 마무리 응답(9번째)까지 포함").
+        val userAnswered = talkTurns.count { it.answerText != null }
+        if (userAnswered >= talkTurnLimit) {
             throw IllegalStateException("이야기 턴 한도 초과 (${talkTurnLimit}턴). /finish로 종료하세요")
         }
 
@@ -466,7 +506,6 @@ class SessionFlowService(
                 userInfos = ContainerUserInfo(
                     nickname = user.profile?.nickname,
                     hobbies = user.profile?.hobbies,
-                    // D-4 [1.2]: tags 주입 완성 — createSession과 동일 헬퍼 재사용 (일관성)
                     tags = userService.buildTagsString(userId).ifEmpty { null },
                     sex = user.profile?.sex,
                     age = user.profile?.birthDate?.let { calcAge(it) },
@@ -523,34 +562,43 @@ class SessionFlowService(
     }
 
     // ============================================================
-    // 4.6 세션 종료 + 리포트 — 동기 응답
+    // [2] 세션 종료 — 간이 보고서 응답 + 리포트 2단계 트리거
     // ============================================================
+
     /**
-     * D-4 [2.3]: /report/total userMemory 라이프사이클 (03a §7.2+§10).
-     * ⚠️ 이번 범위는 "동기 finish 1회 호출"에 userMemory 규약을 붙이는 것 —
-     * /report/problems·total 2단계 분리는 D-5. 이 메서드를 쪼개지 않는다.
-     * D-5에서 2단계 재편 시 userMemory 갱신은 total 경로로 이동 (이관 경계).
-     *
-     * 갱신 규약 (§10.1):
-     *  - 응답 userMemory null·누락 → 기존값 유지 (소실 방지 — 다음 세션 재시도)
-     *  - 길이 > 8192문자 → 절단 저장 (하드캡 — CLOB LENGTH()는 문자 수 기준)
-     *  - 정상 → UPDATE (같은 트랜잭션)
-     *  - 기존 로직(AQ+피드백 6컬럼) 유지
-     *  - 컨테이너 호출 실패 시 전체 롤백이 정상 (@Transactional — "실패 시 기존값 유지"는
-     *    응답 수신 후의 규약)
+     * finish (커밋1 중간형): 리포트 2단계 DTO 반영 — 동기 2호출(problems+total) 분해.
+     * 백그라운드 재편·중단/완료 판정은 커밋2에서 적용 (03a §7 / 03 §9.3).
      */
     @Transactional
     fun finishSession(sessionId: Long, userId: Long): FinishData {
         val session = sessionRepository.findById(sessionId)
             .orElseThrow { IllegalArgumentException("존재하지 않는 세션입니다: $sessionId") }
+            .also {
+                if (it.userId != userId) throw IllegalArgumentException("세션 소유 사용자가 아닙니다")
+                if (it.status != "IN_PROGRESS") throw IllegalStateException("이미 종료된 세션입니다 (${it.status})")
+            }
 
-        // ① USER_PROFILE.USER_MEMORY 현재값 조회 (갱신 기준값 — 첫 세션이면 null)
+        // (커밋1 중간형 — 동기 리포트 2호출 분해. 백그라운드/판정 재편은 커밋2)
         val profile = userProfileRepository.findByUserId(userId)
         val existingMemory = profile?.userMemory
 
-        // ② 컨테이너 호출 (기존값 포함)
-        val response = aiContainerClient.generateReport(
-            ReportRequest(
+        // 간이 보고서 (§7.1 동기) — AQ + 4지표 피드백
+        val problems = aiContainerClient.generateProblems(
+            ProblemsReportRequest(
+                sessionId = sessionId,
+                userId = userId,
+                turns = buildTurnResults(sessionId)
+            )
+        )
+        session.aq = problems.sessionAQ
+        session.listenFeedback = problems.sessionFeedbacks.listenFeedback
+        session.namingFeedback = problems.sessionFeedbacks.namingFeedback
+        session.shadowingFeedback = problems.sessionFeedbacks.shadowingFeedback
+        session.selfTalkFeedback = problems.sessionFeedbacks.selfTalkFeedback
+
+        // 상세 보고서 (§7.2 동기) — talk/total + userMemory 갱신 규약 (§10, D-4 이관 전 유지)
+        val total = aiContainerClient.generateTotal(
+            TotalReportRequest(
                 sessionId = sessionId,
                 userId = userId,
                 userMemory = existingMemory,
@@ -558,46 +606,25 @@ class SessionFlowService(
                 talkContext = buildTalkContext(sessionId)
             )
         )
-
-        session.aq = response.sessionAQ
-        session.listenFeedback = response.sessionFeedbacks.listenFeedback
-        session.namingFeedback = response.sessionFeedbacks.namingFeedback
-        session.shadowingFeedback = response.sessionFeedbacks.shadowingFeedback
-        session.selfTalkFeedback = response.sessionFeedbacks.selfTalkFeedback
-        session.talkFeedback = response.sessionFeedbacks.talkFeedback
-        session.totalFeedback = response.sessionFeedbacks.totalFeedback
-        session.status = "COMPLETED"
-
-        // ③ userMemory 갱신 규약: null·누락 → 기존값 유지(소실 방지) /
-        //    길이 > 8192문자 → 절단 저장(하드캡) / 정상 → UPDATE (같은 트랜잭션)
-        val returnedMemory = response.userMemory
+        total.sessionFeedbacks.talkFeedback?.let { session.talkFeedback = it }
+        total.sessionFeedbacks.totalFeedback?.let { session.totalFeedback = it }
+        val returnedMemory = total.userMemory
         if (returnedMemory != null) {
-            val capped = if (returnedMemory.length > USER_MEMORY_HARD_CAP) {
-                logger.info(
-                    "[D-4] userMemory 하드캡 절단: {}자 → {}자 (문자 수 기준)",
-                    returnedMemory.length, USER_MEMORY_HARD_CAP
-                )
-                returnedMemory.take(USER_MEMORY_HARD_CAP)
-            } else {
-                returnedMemory
-            }
+            val capped = if (returnedMemory.length > USER_MEMORY_HARD_CAP) returnedMemory.take(USER_MEMORY_HARD_CAP) else returnedMemory
             if (profile != null) {
                 profile.userMemory = capped
                 userProfileRepository.save(profile)
-                logger.info(
-                    "[D-4] userMemory 갱신 완료: sessionId={}, 기존={}자 → 신규={}자",
-                    sessionId, existingMemory?.length ?: 0, capped.length
-                )
             } else {
-                // 프로필 행 부재 — 예외 케이스(가입 플로우상 항상 존재). 갱신 스킵+경고 (소실 방지 우선)
                 logger.warn("[D-4] USER_PROFILE 행 부재로 userMemory 갱신 스킵: userId={}", userId)
             }
         } else {
             logger.info("[D-4] userMemory 응답 null — 기존값 유지 (소실 방지): sessionId={}", sessionId)
         }
 
+        session.status = "COMPLETED"
+
         return FinishData(
-            sessionAQ = response.sessionAQ,
+            sessionAQ = problems.sessionAQ,
             feedbacks = FeedbacksDto(
                 listenFeedback = session.listenFeedback,
                 namingFeedback = session.namingFeedback,
@@ -609,13 +636,10 @@ class SessionFlowService(
         )
     }
 
-    companion object {
-        /**
-         * USER_MEMORY 하드캡 (04 v2.6 §4.2): 8KB = 8192 **문자** 기준.
-         * ⚠️ CLOB LENGTH()는 문자 수 — UTF-8 바이트와 다름. 절단·실측 모두 문자 수로 통일.
-         */
-        const val USER_MEMORY_HARD_CAP = 8192
-    }
+    // ============================================================
+    // [2.2] /report/problems 자동 트리거 — 8번째 문제 채점 완료 감지
+    // ============================================================
+
 
     // ============================================================
     // helpers
@@ -649,6 +673,13 @@ class SessionFlowService(
                 )
             }
 
+    /**
+     * talkContext (§7.2): STORYTELLING 턴 — "답변 완료 턴까지만" 필터.
+     * 학습 완료 판정 시 유저 4턴째 답변까지만 포함 규약: AI 응답 생성 중이어도
+     * 유저 답변이 완료된 턴까지만 담는다 — promptText(AI)가 있어도 answerText(유저)가
+     * null인 미완료 턴은 USER 메시지가 없으므로 AI+USER 쌍으로 자연 필터됨.
+     * (확인 후 유지 — 기존 로직이 규약 충족, D-5 승인 시 확인 완료)
+     */
     private fun buildTalkContext(sessionId: Long): List<ChatMessage> =
         turnRepository.findBySessionIdOrderByTurnNumberAsc(sessionId)
             .filter { it.contentType == "STORYTELLING" }
@@ -659,7 +690,7 @@ class SessionFlowService(
                 )
             }
 
-    /** 컨테이너 소문자 타입 → DB seed 코드 (v1.4: listenText→LISTEN_TEXT, listenPicture→LISTEN_PICTURE, selfTalk→SELF_TALK) */
+    /** 컨테이너 소문자 타입 → DB seed 코드 (v1.4: listenText→LISTEN_TEXT 등) */
     private fun toSeedType(containerType: String): String = when (containerType.lowercase()) {
         "selftalk", "self_talk" -> "SELF_TALK"
         "listentext" -> "LISTEN_TEXT"
@@ -674,63 +705,21 @@ class SessionFlowService(
         else -> seedCode.lowercase()
     }
 
-    /** userAQ (§10): 최근 20세션 AQ 상위 10 평균 — 0개면 null */
-    private fun calculateUserAQ(userId: Long): Int? {
-        val aqs = sessionRepository.findByUserIdOrderByCreatedAtDesc(userId).mapNotNull { it.aq }
-        if (aqs.isEmpty()) return null
-        return aqs.sortedDescending().take(10).average().let { Math.ceil(it).toInt() }
-    }
-
-    /**
-     * userRT (§10): 최근 NAMING 음성 20개 중 발화시간/음절수 최단 10개의 (발화시간 총합 ÷ 음절수 총합).
-     * 대상 0개면 null — 호출부에서 0 전송 (v1.4: 구 null 전송 폐지).
-     */
-    private fun calculateUserRT(userId: Long): BigDecimal? {
-        val namingTurnIds = turnRepository.findByContentType("NAMING").map { it.id }.toSet()
-        val records = voiceRecordRepository.findByUserId(userId)
-            .filter { it.speaker == "USER" && it.turnId in namingTurnIds }
-            .filter { (it.syllables ?: 0) > 0 && it.speakingTime != null }
-        if (records.isEmpty()) return null
-        val top10 = records
-            .sortedBy { it.speakingTime!!.divide(BigDecimal(it.syllables!!), 6, RoundingMode.HALF_UP) }
-            .take(10)
-        val speakingSum = top10.fold(BigDecimal.ZERO) { acc, r -> acc + r.speakingTime!! }
-        val syllableSum = top10.fold(BigDecimal.ZERO) { acc, r -> acc + BigDecimal(r.syllables!!) }
-        if (syllableSum.signum() == 0) return null
-        return speakingSum.divide(syllableSum, 6, RoundingMode.HALF_UP)
-    }
-
-    /**
-     * articulationRate (v1.4): 최근 문제풀이(NAMING/SHADOWING/SELF_TALK) 유저 음성 중
-     * SYLLABLES NOT NULL·ARTICULATION_TIME > 0인 것 20개 중 조음속도(ARTICULATION_TIME÷SYLLABLES)
-     * 최단(가장 빠른) 10개의 (SYLLABLES 총합 ÷ ARTICULATION_TIME 총합), 소수 2자리.
-     * 대상 0개면 null — 호출부에서 0 전송 (첫사용 규약).
-     * ⚠️ 본 산정식 전면 적용은 D-5 대상 — 이번 세트는 시그니처 정합(계약 DTO 필드 충족)만.
-     */
-    private fun calculateArticulationRate(userId: Long): BigDecimal? {
-        val voicedTypeTurnIds = turnRepository.findByContentTypeIn(listOf("NAMING", "SHADOWING", "SELF_TALK"))
-            .map { it.id }.toSet()
-        val records = voiceRecordRepository.findByUserId(userId)
-            .filter { it.speaker == "USER" && it.turnId in voicedTypeTurnIds }
-            .filter { (it.syllables ?: 0) > 0 && it.articulationTime != null && it.articulationTime!!.signum() > 0 }
-        if (records.isEmpty()) return null
-        val top10 = records
-            .sortedBy { it.articulationTime!!.divide(BigDecimal(it.syllables!!), 6, RoundingMode.HALF_UP) }
-            .take(10)
-        val syllableSum = top10.fold(BigDecimal.ZERO) { acc, r -> acc + BigDecimal(r.syllables!!) }
-        val articulationSum = top10.fold(BigDecimal.ZERO) { acc, r -> acc + r.articulationTime!! }
-        if (articulationSum.signum() == 0) return null
-        return syllableSum.divide(articulationSum, 2, RoundingMode.HALF_UP)
-    }
-
     /** BIRTH_DATE 기반 나이 산정 (03a §1.1 — 구 AGE 컬럼 폐지 대체) */
     private fun calcAge(birthDate: java.time.LocalDate): Int =
         java.time.Period.between(birthDate, java.time.LocalDate.now()).years
 
+    /**
+     * B-4 (D-5 [5.1]): 스텁 TTS 타입별 매핑 확정.
+     * LISTEN_TEXT/LISTEN_PICTURE→tts_listen / NAMING→tts_naming /
+     * SHADOWING→tts_shadowing / STORYTELLING(및 기타)→tts_hello
+     * (기존 4종 샘플 재사용 — 새 mp3 추가 없이 경로 분기만 확정, 커밋 최소화)
+     */
     private fun stubTtsFile(contentType: String): String = when (contentType) {
         "LISTEN_TEXT", "LISTEN_PICTURE" -> "tts_listen.mp3"
         "NAMING" -> "tts_naming.mp3"
         "SHADOWING" -> "tts_shadowing.mp3"
+        "STORYTELLING" -> "tts_hello.mp3"
         else -> "tts_hello.mp3"
     }
 
@@ -760,5 +749,68 @@ class SessionFlowService(
             logger.warn("choices_json 파싱 실패: {}", e.message)
             null
         }
+    }
+
+    // ============================================================
+    // [3] 산정식 — userAQ 캐시 교체 + articulationRate·userRT 최근 20개 창 (03 §10)
+    // ============================================================
+
+    /**
+     * articulationRate (v1.4/03 계약서 §10): 최근 문제풀이(NAMING/SHADOWING/SELF_TALK)
+     * 유저 음성 중 SYLLABLES NOT NULL·ARTICULATION_TIME > 0인 것 중 **최근 20개 창**
+     * (createdAt 내림차순 20행) 안에서 조음속도(ARTICULATION_TIME÷SYLLABLES) 최단
+     * (가장 빠른) 10개의 (SYLLABLES 총합 ÷ ARTICULATION_TIME 총합), 소수 2자리.
+     * 대상 0개면 null — 호출부에서 0 전송 (첫사용 규약).
+     * ⚠️ D-5 [3.2] 수정: 구 초안은 전체 이력 정렬 take(10) — 최근 20개 창 적용으로 교체.
+     */
+    private fun calculateArticulationRate(userId: Long): BigDecimal? {
+        val voicedTypeTurnIds = turnRepository.findByContentTypeIn(listOf("NAMING", "SHADOWING", "SELF_TALK"))
+            .map { it.id }.toSet()
+        val records = voiceRecordRepository.findByUserId(userId)
+            .filter { it.speaker == "USER" && it.turnId in voicedTypeTurnIds }
+            .filter { (it.syllables ?: 0) > 0 && it.articulationTime != null && it.articulationTime!!.signum() > 0 }
+        if (records.isEmpty()) return null
+        val top10 = records
+            .sortedBy { it.articulationTime!!.divide(BigDecimal(it.syllables!!), 6, RoundingMode.HALF_UP) }
+            .take(10)
+        val syllableSum = top10.fold(BigDecimal.ZERO) { acc, r -> acc + BigDecimal(r.syllables!!) }
+        val articulationSum = top10.fold(BigDecimal.ZERO) { acc, r -> acc + r.articulationTime!! }
+        if (articulationSum.signum() == 0) return null
+        return syllableSum.divide(articulationSum, 2, RoundingMode.HALF_UP)
+    }
+
+    /**
+     * userRT (§10): 최근 NAMING 음성 중 SYLLABLES>0·SPEAKING_TIME NOT NULL 대상
+     * **최근 20개 창** 안에서 발화시간/음절수 최단 10개의 (발화시간 총합 ÷ 음절수 총합).
+     * 대상 0개면 null — 호출부에서 0 전송 (v1.4: 구 null 전송 폐지).
+     * ⚠️ D-5 [3.2] 수정: userRT도 최근 20개 창 적용 (구 전체 이력 폐지).
+     */
+    private fun calculateUserRT(userId: Long): BigDecimal? {
+        val namingTurnIds = turnRepository.findByContentType("NAMING").map { it.id }.toSet()
+        val records = voiceRecordRepository.findByUserId(userId)
+            .filter { it.speaker == "USER" && it.turnId in namingTurnIds }
+            .filter { (it.syllables ?: 0) > 0 && it.speakingTime != null }
+        if (records.isEmpty()) return null
+        val top10 = records
+            .sortedBy { it.speakingTime!!.divide(BigDecimal(it.syllables!!), 6, RoundingMode.HALF_UP) }
+            .take(10)
+        val speakingSum = top10.fold(BigDecimal.ZERO) { acc, r -> acc + r.speakingTime!! }
+        val syllableSum = top10.fold(BigDecimal.ZERO) { acc, r -> acc + BigDecimal(r.syllables!!) }
+        if (syllableSum.signum() == 0) return null
+        return speakingSum.divide(syllableSum, 6, RoundingMode.HALF_UP)
+    }
+
+    companion object {
+        /**
+         * USER_MEMORY 하드캡 (04 v2.6 §4.2): 8KB = 8192 **문자** 기준.
+         * ⚠️ CLOB LENGTH()는 문자 수 — UTF-8 바이트와 다름. 절단·실측 모두 문자 수로 통일.
+         */
+        const val USER_MEMORY_HARD_CAP = 8192
+
+        /** 문제풀이 5종 — STORYTELLING 제외 (TURN 집계·8문제 완료 감지 공용) */
+        val PROBLEM_TYPES = listOf("LISTEN_TEXT", "LISTEN_PICTURE", "NAMING", "SHADOWING", "SELF_TALK")
+
+        /** 테마 유효성 (D-5 [1.2] — IMAGE_THEMA CHECK 6종 중 EASY 기본 3종) */
+        val ALLOWED_THEMAS = setOf("TEST", "HOSPITAL", "CAFE")
     }
 }

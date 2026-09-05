@@ -4,7 +4,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import java.math.BigDecimal
 
 /**
- * BE ↔ AI 컨테이너 계약 DTO 세트 (03a_AI_Container_API_Reference.md v1.7 + 03 v1.6 기준).
+ * BE ↔ AI 컨테이너 계약 DTO 세트 (03a_AI_Container_API_Reference.md v1.8 + 03 v1.6 기준).
  * - 컨테이너 JSON 규약을 그대로 반영 (sessionID/userID 등 대소문자 포함).
  * - 소문자 camelCase 타입 표기: listenText / listenPicture / naming / shadowing / selfTalk
  *   (v1.4: 구 `listen` 폐지 → LISTEN 세분화)
@@ -19,6 +19,12 @@ import java.math.BigDecimal
  * v1.8 (D-4, 2026-09-05) 변경:
  * - ReportRequest.userMemory: String? 신설 — 기존 누적값 전달 (03a §7.2/§10)
  * - ReportResponse.userMemory: String? 신설 — 갱신값 (소득 없음=요청값 동일 반환)
+ *
+ * v1.9 (D-5, 2026-09-06) 변경:
+ * - ReportRequest/ReportResponse 폐지 → ProblemsReportRequest/Response(§7.1) +
+ *   TotalReportRequest/Response(§7.2) 2종 분리 (리포트 2단계 계약)
+ * - SessionFeedbacks: 6종 전부 nullable 전환 — §7.1은 4지표 non-null+talk/total null,
+ *   §7.2는 talk/total non-null+4지표 null. 백엔드는 각 단계에서 non-null 필드만 UPDATE
  */
 
 // ============================================================
@@ -60,7 +66,7 @@ data class CreateSessionResponse(
 )
 
 data class ContainerProblem(
-    @JsonProperty("turnId") val turnId: Int,            // 컨테이너 로컬 번호 1~8 (ADR-006)
+    @JsonProperty("turnId") val turnId: Int = 0,        // 컨테이너 로컬 번호 1~8 (ADR-006) — 스텁은 최종 mapIndexed에서 재부여
     @JsonProperty("type") val type: String,             // listenText | listenPicture | naming | shadowing | selfTalk
     @JsonProperty("ttsPath") val ttsPath: String?,      // 공유폴더상 AI TTS 경로
     @JsonProperty("passage") val passage: String?,
@@ -191,33 +197,67 @@ data class AiChatResponse(
 )
 
 // ============================================================
-// POST /report/problems · /report/total — 세션 보고서 2단계 (§7)
+// POST /report/problems — 간이 보고서 (§7.1, v1.9 D-5 신설)
 // ============================================================
 
-data class ReportRequest(
+/**
+ * §7.1 간이 보고서 요청 — 8번째 문제 채점 완료 시점에 백엔드가 자동 호출.
+ * turns = 문제풀이 8턴 전부 (이야기 턴 미포함).
+ */
+data class ProblemsReportRequest(
     @JsonProperty("sessionID") val sessionId: Long,
     @JsonProperty("userID") val userId: Long,
-    // D-4 [2.1] (03a §7.2): 기존 누적 userMemory — 갱신 기준값. 첫 세션/기존 없으면 null.
+    @JsonProperty("turns") val turns: List<TurnResult>
+)
+
+data class ProblemsReportResponse(
+    @JsonProperty("sessionID") val sessionId: Long,
+    @JsonProperty("userID") val userId: Long,
+    // 100점 만점 정수 — 8개 문제 점수만으로 산출 (AI 대화 미포함). 소수점 올림은 컨테이너 책임.
+    @JsonProperty("sessionAQ") val sessionAQ: Int,
+    @JsonProperty("sessionFeedbacks") val sessionFeedbacks: SessionFeedbacks
+)
+
+// ============================================================
+// POST /report/total — 상세 보고서 (§7.2, v1.9 D-5 신설)
+// ============================================================
+
+/**
+ * §7.2 상세 보고서 — 세션 종료(학습 완료 판정·하드캡) 시점 백그라운드 호출.
+ * 학습 중단(이야기 1~3턴)은 호출하지 않는다 (03 §9.3).
+ */
+data class TotalReportRequest(
+    @JsonProperty("sessionID") val sessionId: Long,
+    @JsonProperty("userID") val userId: Long,
+    // 기존 누적 userMemory — 갱신 기준값. 첫 세션/기존 없으면 null (03a §7.2/§10)
     @JsonProperty("userMemory") val userMemory: String? = null,
     @JsonProperty("turns") val turns: List<TurnResult>,
+    // 이야기 턴 대화 로그 — 학습 완료 판정 시 유저 4턴째 답변까지만 포함
     @JsonProperty("talkContext") val talkContext: List<ChatMessage>
 )
 
-data class SessionFeedbacks(
-    @JsonProperty("listenFeedback") val listenFeedback: String,
-    @JsonProperty("namingFeedback") val namingFeedback: String,
-    @JsonProperty("shadowingFeedback") val shadowingFeedback: String,
-    @JsonProperty("selfTalkFeedback") val selfTalkFeedback: String,
-    @JsonProperty("talkFeedback") val talkFeedback: String,
-    @JsonProperty("totalFeedback") val totalFeedback: String
-)
-
-data class ReportResponse(
+data class TotalReportResponse(
     @JsonProperty("sessionID") val sessionId: Long,
     @JsonProperty("userID") val userId: Long,
-    // D-4 [2.2] (03a §7.2): 갱신된 userMemory — 갱신할 소득 없으면 요청값과 동일 반환.
-    // 실패·누락·null → 백엔드는 기존 값 유지 (소실 방지, §10 규약).
+    // 갱신된 userMemory — 갱신할 소득 없으면 요청값과 동일 반환.
+    // 실패·누락·null → 백엔드는 기존 값 유지 (소실 방지, §10 규약)
     @JsonProperty("userMemory") val userMemory: String? = null,
-    @JsonProperty("sessionAQ") val sessionAQ: Int,   // 100점 만점 정수
     @JsonProperty("sessionFeedbacks") val sessionFeedbacks: SessionFeedbacks
+)
+
+// ============================================================
+// sessionFeedbacks — 공통 피드백 객체 (§7.1·§7.2)
+// ============================================================
+
+/**
+ * v1.9: 6종 전부 nullable — 각 단계별 non-null 규약(§7.1: 4지표 / §7.2: talk+total)은
+ * 컨테이너 책임이며 백엔드는 non-null 필드만 UPDATE한다 (null 필드 무시).
+ */
+data class SessionFeedbacks(
+    @JsonProperty("listenFeedback") val listenFeedback: String? = null,
+    @JsonProperty("namingFeedback") val namingFeedback: String? = null,
+    @JsonProperty("shadowingFeedback") val shadowingFeedback: String? = null,
+    @JsonProperty("selfTalkFeedback") val selfTalkFeedback: String? = null,
+    @JsonProperty("talkFeedback") val talkFeedback: String? = null,
+    @JsonProperty("totalFeedback") val totalFeedback: String? = null
 )

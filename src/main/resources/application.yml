@@ -117,4 +117,5 @@ ai:
 # 데모 세션 플로우 설정
 demo:
   themes: TEST
-  talk-turn-limit: 3
+  # D-5 [2.3]: 8턴 하드캡 (기획 확정 — 유저 8턴 답변 후 AI 마무리 응답까지. 구 데모 3턴 폐지)
+  talk-turn-limit: 8

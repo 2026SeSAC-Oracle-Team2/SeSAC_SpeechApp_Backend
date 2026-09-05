@@ -6,12 +6,14 @@ import com.sesac.speechapp.dto.aicontainer.CreateSessionRequest
 import com.sesac.speechapp.dto.aicontainer.CreateSessionResponse
 import com.sesac.speechapp.dto.aicontainer.NamingScoreRequest
 import com.sesac.speechapp.dto.aicontainer.NamingScoreResponse
-import com.sesac.speechapp.dto.aicontainer.ReportRequest
-import com.sesac.speechapp.dto.aicontainer.ReportResponse
+import com.sesac.speechapp.dto.aicontainer.ProblemsReportRequest
+import com.sesac.speechapp.dto.aicontainer.ProblemsReportResponse
 import com.sesac.speechapp.dto.aicontainer.SelfTalkScoreRequest
 import com.sesac.speechapp.dto.aicontainer.SelfTalkScoreResponse
 import com.sesac.speechapp.dto.aicontainer.ShadowingScoreRequest
 import com.sesac.speechapp.dto.aicontainer.ShadowingScoreResponse
+import com.sesac.speechapp.dto.aicontainer.TotalReportRequest
+import com.sesac.speechapp.dto.aicontainer.TotalReportResponse
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
@@ -22,6 +24,9 @@ import org.springframework.web.client.RestClient
  * ⚠️ TODO: AI 컨테이너(FastAPI) 배포 후 활성화. 계약서 03의 엔드포인트/바디 그대로.
  *  - 타임아웃/에러 규약은 미정(고도화 과제) — 데모 단계에서는 컨테이너 가용성 가정.
  *  - 음성 파일은 HTTP로 보내지 않는다: 공유폴더 경로(docker compose volume)만 전달.
+ *
+ * v1.9 (D-5, 2026-09-06): 세션 2종(/sessions/today·theme) + 리포트 2단계
+ * (/report/problems·total) 엔드포인트 반영.
  */
 @Component
 @ConditionalOnProperty(name = ["ai.container.mode"], havingValue = "real")
@@ -34,13 +39,21 @@ class RealAiContainerClient(
         .baseUrl("http://localhost:8000")
         .build()
 
-    override fun createSession(request: CreateSessionRequest): CreateSessionResponse =
+    override fun createSessionToday(request: CreateSessionRequest): CreateSessionResponse =
         restClient.post()
-            .uri("/sessions")
+            .uri("/sessions/today")
             .body(request)
             .retrieve()
             .body(CreateSessionResponse::class.java)
-            ?: throw IllegalStateException("AI 컨테이너 /sessions 응답이 비어 있습니다")
+            ?: throw IllegalStateException("AI 컨테이너 /sessions/today 응답이 비어 있습니다")
+
+    override fun createSessionTheme(request: CreateSessionRequest): CreateSessionResponse =
+        restClient.post()
+            .uri("/sessions/theme")
+            .body(request)
+            .retrieve()
+            .body(CreateSessionResponse::class.java)
+            ?: throw IllegalStateException("AI 컨테이너 /sessions/theme 응답이 비어 있습니다")
 
     override fun scoreNaming(request: NamingScoreRequest): NamingScoreResponse =
         restClient.post()
@@ -74,11 +87,19 @@ class RealAiContainerClient(
             .body(AiChatResponse::class.java)
             ?: throw IllegalStateException("AI 컨테이너 /aichat 응답이 비어 있습니다")
 
-    override fun generateReport(request: ReportRequest): ReportResponse =
+    override fun generateProblems(request: ProblemsReportRequest): ProblemsReportResponse =
         restClient.post()
-            .uri("/report")
+            .uri("/report/problems")
             .body(request)
             .retrieve()
-            .body(ReportResponse::class.java)
-            ?: throw IllegalStateException("AI 컨테이너 /report 응답이 비어 있습니다")
+            .body(ProblemsReportResponse::class.java)
+            ?: throw IllegalStateException("AI 컨테이너 /report/problems 응답이 비어 있습니다")
+
+    override fun generateTotal(request: TotalReportRequest): TotalReportResponse =
+        restClient.post()
+            .uri("/report/total")
+            .body(request)
+            .retrieve()
+            .body(TotalReportResponse::class.java)
+            ?: throw IllegalStateException("AI 컨테이너 /report/total 응답이 비어 있습니다")
 }
