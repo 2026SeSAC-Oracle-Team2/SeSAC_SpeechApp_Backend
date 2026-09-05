@@ -36,6 +36,14 @@ class GlobalExceptionHandler {
             .body(ApiResponse.error("E0404", "요청한 리소스를 찾을 수 없습니다."))
     }
 
+    @ExceptionHandler(NoSuchElementException::class)
+    fun handleNotFoundElement(e: NoSuchElementException): ResponseEntity<ApiResponse<Nothing>> {
+        logger.warn("리소스 없음: ${e.message}")
+        return ResponseEntity
+            .status(HttpStatus.NOT_FOUND)
+            .body(ApiResponse.error("E0404", e.message ?: "요청한 리소스를 찾을 수 없습니다."))
+    }
+
     @ExceptionHandler(Exception::class)
     fun handleGeneric(e: Exception): ResponseEntity<ApiResponse<Nothing>> {
         logger.error("서버 내부 오류: ${e.message}", e)

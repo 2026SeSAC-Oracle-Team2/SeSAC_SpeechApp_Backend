@@ -1,14 +1,24 @@
 package com.sesac.speechapp.service
 
+import com.sesac.speechapp.dto.ScoresResponse
+import com.sesac.speechapp.dto.SurveyRequest
+import com.sesac.speechapp.dto.SurveyResponse
+import com.sesac.speechapp.dto.TagsResponse
+import com.sesac.speechapp.dto.TagItem
 import com.sesac.speechapp.dto.UserDto
 import com.sesac.speechapp.dto.UpdateProfileRequest
 import com.sesac.speechapp.entity.AppUser
 import com.sesac.speechapp.entity.UserProfile
+import com.sesac.speechapp.entity.UserProfileTag
+import com.sesac.speechapp.entity.UserRepresentativeScore
 import com.sesac.speechapp.repository.AppUserRepository
 import com.sesac.speechapp.repository.SessionRepository
+import com.sesac.speechapp.repository.TagRepository
 import com.sesac.speechapp.repository.TurnImageRepository
 import com.sesac.speechapp.repository.TurnRepository
 import com.sesac.speechapp.repository.UserProfileRepository
+import com.sesac.speechapp.repository.UserProfileTagRepository
+import com.sesac.speechapp.repository.UserRepresentativeScoreRepository
 import com.sesac.speechapp.repository.VoiceRecordRepository
 import com.sesac.speechapp.security.deleteUserByUid
 import org.slf4j.LoggerFactory
@@ -17,6 +27,7 @@ import org.springframework.transaction.annotation.Transactional
 import org.springframework.transaction.support.TransactionSynchronization
 import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 
 @Service
@@ -27,6 +38,9 @@ class UserService(
     private val turnRepository: TurnRepository,
     private val turnImageRepository: TurnImageRepository,
     private val voiceRecordRepository: VoiceRecordRepository,
+    private val tagRepository: TagRepository,
+    private val userProfileTagRepository: UserProfileTagRepository,
+    private val userRepresentativeScoreRepository: UserRepresentativeScoreRepository,
     private val objectStorageService: ObjectStorageService
 ) {
     private val logger = LoggerFactory.getLogger(UserService::class.java)
@@ -58,6 +72,14 @@ class UserService(
         return toDto(user)
     }
 
+    /**
+     * 프로필 수정 (D-3 [1] — 05a §2 갱신).
+     *
+     * 부분 업데이트 규약: null 필드는 기존값 유지. tagIds=null이면 태그 교체 금지
+     * (명시적 []만 전체 삭제 의미). birthDate는 ISO yyyy-MM-dd 고정 — 파싱 실패 → E0400.
+     * tagIds는 USER_PROFILE_TAGS 전량 교체(기존 DELETE 후 INSERT) — 클라가 항상
+     * 현재 선택 전체를 보낸다. >5개 → E0400, 없는 tag_id → E0404.
+     */
     @Transactional
     fun updateProfile(userUuid: String, request: UpdateProfileRequest): UserDto {
         val user = appUserRepository.findByUuid(userUuid)
@@ -69,16 +91,131 @@ class UserService(
         request.nickname?.let {
             profile.nickname = it
         }
+        request.hobbies?.let {
+            profile.hobbies = it
+        }
+        request.sex?.let {
+            profile.sex = it
+        }
+        request.birthDate?.let { raw ->
+            profile.birthDate = try {
+                LocalDate.parse(raw) // ISO yyyy-MM-dd (DateTimeFormatter.ISO_LOCAL_DATE 기본)
+            } catch (e: Exception) {
+                throw IllegalArgumentException("birthDate 형식 오류: yyyy-MM-dd 형식이 필요합니다. (수신: $raw)")
+            }
+        }
+        request.tagIds?.let { tagIds ->
+            replaceTags(user, tagIds)
+        }
 
         return toDto(user)
     }
 
     /**
+     * USER_PROFILE_TAGS 전량 교체 — 기존 DELETE 후 INSERT (D-3 [1]).
+     * JPQL 벌크 DELETE는 즉시 SQL 실행 → 이후 INSERT가 커밋 시 flush되어 순서 보장.
+     * USER_PROFILE_TAGS.USER_ID FK → APP_USER.ID (FK_UPT_USER 실측) — 키는 user.id.
+     */
+    private fun replaceTags(user: AppUser, tagIds: List<Long>) {
+        if (tagIds.size > 5) {
+            throw IllegalArgumentException("태그는 최대 5개까지 선택할 수 있습니다. (수신: ${tagIds.size}개)")
+        }
+        val userId = requireNotNull(user.id) { "사용자 ID 누락: ${user.uuid}" }
+        val distinctIds = tagIds.distinct() // 중복 전송 시 복합 PK 충돌 방지
+        if (distinctIds.isNotEmpty()) {
+            val found = tagRepository.findAllById(distinctIds)
+            if (found.size != distinctIds.size) {
+                throw NoSuchElementException("존재하지 않는 태그가 포함되어 있습니다. (요청 tagIds=$tagIds)") // → E0404
+            }
+        }
+        // 전량 교체: 기존 DELETE 후 INSERT
+        userProfileTagRepository.deleteByUserId(userId)
+        distinctIds.forEach { tagId ->
+            userProfileTagRepository.save(UserProfileTag(userId = userId, tagId = tagId))
+        }
+        logger.info("프로필 태그 전량 교체: uuid={}, tagIds={}", user.uuid, distinctIds)
+    }
+
+    /**
+     * 가입 설문 접수 (D-3 [3] — 06 §5.2).
+     * 산출 주체 = 서버: answers 원문(5개, 1~5)만 수신 → 총점 = Σ(answer×4) → 환산 AQ.
+     * 환산: 20~61 → 30 / 62~80 → 70 / 81~100 → 90.
+     * USER_REPRESENTATIVE_SCORES upsert — 행 없으면 INSERT, 있으면 user_aq 갱신(재노출 케이스).
+     * 응답 원문은 저장하지 않는다(환산 AQ만). 중복 응답 허용(갱신 처리 — 405 거부 금지).
+     * REP_SCORES.USER_ID FK → USER_PROFILE.USER_ID (= APP_USER.ID 값, FK_REP_SCORES_USER 실측) — 키는 user.id.
+     */
+    @Transactional
+    fun submitSurvey(userUuid: String, request: SurveyRequest): SurveyResponse {
+        val user = appUserRepository.findByUuid(userUuid)
+            ?: throw IllegalArgumentException("사용자를 찾을 수 없습니다: $userUuid")
+
+        val answers = request.answers
+        if (answers.size != 5) {
+            throw IllegalArgumentException("설문 응답은 5개 문항의 답변이 필요합니다. (수신: ${answers.size}개)")
+        }
+        if (answers.any { it < 1 || it > 5 }) {
+            throw IllegalArgumentException("설문 답변은 1~5 범위의 정수여야 합니다.")
+        }
+
+        val total = answers.sumOf { it * 4 } // 20~100
+        val userAq = when (total) {
+            in 20..61 -> 30
+            in 62..80 -> 70
+            in 81..100 -> 90
+            else -> throw IllegalStateException("설문 총점이 허용 범위를 벗어났습니다: $total")
+        }
+
+        val userId = requireNotNull(user.id) { "사용자 ID 누락: $userUuid" }
+        val existing = userRepresentativeScoreRepository.findByUserId(userId)
+        if (existing == null) {
+            userRepresentativeScoreRepository.save(UserRepresentativeScore(userId = userId, userAq = userAq))
+            logger.info("가입 설문 접수 — REP_SCORES 신규 INSERT: uuid={}, total={}, userAq={}", userUuid, total, userAq)
+        } else {
+            existing.userAq = userAq // dirty checking UPDATE (재노출 케이스 — 갱신 처리)
+            logger.info("가입 설문 재접수 — userAq 갱신: uuid={}, total={}, userAq={}", userUuid, total, userAq)
+        }
+
+        return SurveyResponse(userAq = userAq, user = toDto(user))
+    }
+
+    /**
+     * 대표점수 조회 (D-3 [4] — 05a §8.1).
+     * REP_SCORES 단일 SELECT. 행이 없으면(신규 가입 직후 설문 전) 전 필드 null — 클라 폴백.
+     */
+    @Transactional(readOnly = true)
+    fun getScores(userUuid: String): ScoresResponse {
+        val user = appUserRepository.findByUuid(userUuid)
+            ?: throw IllegalArgumentException("사용자를 찾을 수 없습니다: $userUuid")
+
+        val rep = requireNotNull(user.id) { "사용자 ID 누락: $userUuid" }
+            .let { userRepresentativeScoreRepository.findByUserId(it) }
+
+        return ScoresResponse(
+            userAq = rep?.userAq,
+            listen = rep?.userScoreListen,
+            naming = rep?.userScoreNaming,
+            shadowing = rep?.userScoreShadowing,
+            selfTalk = rep?.userScoreSelfTalk
+        )
+    }
+
+    /** 태그 마스터 15종 조회 (D-3 [2] — 05a §2). order by tagId */
+    @Transactional(readOnly = true)
+    fun getTags(): TagsResponse {
+        return TagsResponse(
+            tags = tagRepository.findAllByOrderByTagIdAsc().map { TagItem(tagId = requireNotNull(it.tagId), tag = it.tag) }
+        )
+    }
+
+    /**
      * 회원탈퇴: DB hard delete + OCI 유저 파일 정리 + Firebase 계정 삭제(커밋 후).
      *
-     * - DB 삭제는 전 FK가 NO ACTION(무 CASCADE)이므로 **자식부터 FK 역순**으로 삭제한다 (B-1).
-     *   순서: TURN_IMAGE → VOICE_RECORD → TURN → LEARNING_SESSION → USER_PROFILE → APP_USER
+     * - DB 삭제는 전 FK가 NO ACTION(무 CASCADE)이므로 **자식부터 FK 역순**으로 삭제한다 (B-1 + D-3 [5]).
+     *   순서: TURN_IMAGE → VOICE_RECORD → TURN → LEARNING_SESSION → USER_PROFILE_TAGS →
+     *         USER_REPRESENTATIVE_SCORES → USER_PROFILE → APP_USER
+     *   (D-1 신설 USER_PROFILE_TAGS/USER_REPRESENTATIVE_SCORES 미삭제 시 PROFILE 삭제 ORA-02292 — 핵심 회귀)
      *   (JPQL 벌크 삭제는 영속성 컨텍스트를 우회하므로 flush()로 선행 영속화분을 강제 반영한 뒤 수행)
+     * - TAGS는 마스터(공유) 테이블이라 삭제 금지 — 유저 연결(UPS)만 삭제.
      * - OCI 음성/프로필 파일(userfiles 버킷의 {userUUID}/ 하위)은 실패해도 탈퇴를 막지 않는다(로그만).
      * - @Transactional은 DB 삭제에만 의미가 있다.
      * - Firebase 삭제는 DB 커밋 성공 후(afterCommit)에 시도하며,
@@ -163,15 +300,40 @@ class UserService(
         return profile
     }
 
-    fun toDto(user: AppUser): UserDto = UserDto(
-        id = user.id ?: -1L,
-        uuid = user.uuid,
-        email = user.email,
-        nickname = user.profile?.nickname,
-        profileImageUrl = user.profile?.profileImageBucketPath,
-        level = 1,
-        // LocalDateTime → Instant 변환은 반드시 atZone(...).toInstant() 사용
-        // (Instant.from(LocalDateTime)은 UnsupportedTemporalTypeException 발생)
-        createdAt = user.createdAt?.atZone(ZoneId.systemDefault())?.toInstant()
-    )
+    /**
+     * D-3: UserDto 확장 — 기존 필드 유지 + hobbies/sex/birthDate/tags/userAq 추가 (하위호환).
+     * - birthDate: LocalDate → ISO yyyy-MM-dd 문자열 (LocalDate.toString)
+     * - tags: USER_PROFILE_TAGS → TAGS 조인 후 쉼표 문자열 (03a §1.1 형식 "등산, 골프")
+     *   ⚠️ UPS.USER_ID FK → APP_USER.ID (FK_UPT_USER 실측) — 키는 user.id
+     * - userAq: REP_SCORES.USER_ID FK → USER_PROFILE.USER_ID (= APP_USER.ID 값, FK_REP_SCORES_USER 실측) — null 허용
+     *   (/sessions userInfos 주입은 D-5 — 이번엔 DTO 응답만)
+     */
+    fun toDto(user: AppUser): UserDto {
+        val profile = user.profile
+        val userId = requireNotNull(user.id) { "사용자 ID 누락: ${user.uuid}" }
+        val userAq = userRepresentativeScoreRepository.findByUserId(userId)?.userAq
+        // 단일 findAllById로 태그명 조회 (루프 findById N+1 회피), 순서는 연결행 tagId 순 유지
+        val tagRels = userProfileTagRepository.findByUserIdOrderByTagIdAsc(userId)
+        val tagNames: Map<Long, String> = if (tagRels.isEmpty()) emptyMap() else
+            tagRepository.findAllById(tagRels.map { it.tagId })
+                .associate { requireNotNull(it.tagId) to it.tag }
+        val tags = tagRels.mapNotNull { tagNames[it.tagId] }.joinToString(", ")
+
+        return UserDto(
+            id = userId,
+            uuid = user.uuid,
+            email = user.email,
+            nickname = profile?.nickname,
+            profileImageUrl = profile?.profileImageBucketPath,
+            hobbies = profile?.hobbies,
+            sex = profile?.sex,
+            birthDate = profile?.birthDate?.toString(),
+            tags = tags.ifEmpty { null },
+            userAq = userAq,
+            level = 1,
+            // LocalDateTime → Instant 변환은 반드시 atZone(...).toInstant() 사용
+            // (Instant.from(LocalDateTime)은 UnsupportedTemporalTypeException 발생)
+            createdAt = user.createdAt?.atZone(ZoneId.systemDefault())?.toInstant()
+        )
+    }
 }

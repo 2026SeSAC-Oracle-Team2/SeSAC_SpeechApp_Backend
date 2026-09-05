@@ -17,7 +17,8 @@ class AuthService(
     private val firebaseAuthUtil: FirebaseAuthUtil,
     private val jwtTokenProvider: JwtTokenProvider,
     private val appUserRepository: AppUserRepository,
-    private val userProfileRepository: UserProfileRepository
+    private val userProfileRepository: UserProfileRepository,
+    private val userService: UserService
 ) {
     private val logger = LoggerFactory.getLogger(AuthService::class.java)
 
@@ -46,15 +47,9 @@ class AuthService(
             accessToken = accessToken,
             refreshToken = refreshToken,
             expiresIn = 900,
-            user = UserDto(
-                id = user.id ?: -1L,
-                uuid = user.uuid,
-                email = user.email,
-                nickname = user.profile?.nickname,
-                profileImageUrl = user.profile?.profileImageBucketPath,
-                level = 1,
-                createdAt = user.createdAt?.atZone(java.time.ZoneId.systemDefault())?.toInstant()
-            ),
+            // D-3: UserDto 확장(hobbies/sex/birthDate/tags/userAq) 통일 — userAq null = 설문 미응답
+            // (클라 재노출 판별은 USER_AQ null 기준, 06 §5.2)
+            user = userService.toDto(user),
             isNewUser = isNewUser
         )
     }

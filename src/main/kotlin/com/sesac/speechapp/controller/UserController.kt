@@ -3,6 +3,10 @@ package com.sesac.speechapp.controller
 import com.sesac.speechapp.dto.ApiResponse
 import com.sesac.speechapp.dto.UserDto
 import com.sesac.speechapp.dto.UpdateProfileRequest
+import com.sesac.speechapp.dto.TagsResponse
+import com.sesac.speechapp.dto.SurveyRequest
+import com.sesac.speechapp.dto.SurveyResponse
+import com.sesac.speechapp.dto.ScoresResponse
 import com.sesac.speechapp.service.ObjectStorageService
 import com.sesac.speechapp.service.UserService
 import org.slf4j.LoggerFactory
@@ -38,6 +42,40 @@ class UserController(
         @RequestBody request: UpdateProfileRequest
     ): ResponseEntity<ApiResponse<UserDto>> {
         val result = userService.updateProfile(userUuid, request)
+        return ResponseEntity.ok(ApiResponse.success(result))
+    }
+
+    /**
+     * 태그 마스터 조회 (D-3 [2] — 05a §2): 15종 {tagId, tag} 목록. JWT 필수.
+     */
+    @GetMapping("/me/tags")
+    fun getTags(): ResponseEntity<ApiResponse<TagsResponse>> {
+        val result = userService.getTags()
+        return ResponseEntity.ok(ApiResponse.success(result))
+    }
+
+    /**
+     * 가입 설문 접수 (D-3 [3] — 06 §5.2): answers 5개(1~5) → 서버 산출 환산 AQ(30/70/90)
+     * + REP_SCORES upsert. 중복 응답 허용(갱신 처리). 산출 주체 = 서버.
+     */
+    @PostMapping("/me/survey")
+    fun submitSurvey(
+        @AuthenticationPrincipal userUuid: String,
+        @RequestBody request: SurveyRequest
+    ): ResponseEntity<ApiResponse<SurveyResponse>> {
+        val result = userService.submitSurvey(userUuid, request)
+        return ResponseEntity.ok(ApiResponse.success(result))
+    }
+
+    /**
+     * 대표점수 조회 (D-3 [4] — 05a §8.1): { userAq, listen, naming, shadowing, selfTalk }.
+     * REP_SCORES 단일 SELECT — null은 null 전달 (클라 폴백).
+     */
+    @GetMapping("/me/scores")
+    fun getScores(
+        @AuthenticationPrincipal userUuid: String
+    ): ResponseEntity<ApiResponse<ScoresResponse>> {
+        val result = userService.getScores(userUuid)
         return ResponseEntity.ok(ApiResponse.success(result))
     }
 
