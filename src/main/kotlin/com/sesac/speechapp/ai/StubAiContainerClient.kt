@@ -97,19 +97,19 @@ class StubAiContainerClient : AiContainerClient {
     override fun createSession(request: CreateSessionRequest): CreateSessionResponse {
         sleepRandom(2000, 3000, "세션 문제 생성")
 
-        // 8문제: 4타입 × 2회, 무작위 순서
-        val types = mutableListOf("listen", "listen", "naming", "naming", "shadowing", "shadowing", "selfTalk", "selfTalk")
+        // 8문제: LISTEN_TEXT 1 + LISTEN_PICTURE 1 + NAMING 2 + SHADOWING 2 + SELF_TALK 2 = 8, 무작위 순서
+        // (v1.4: 구 listen 단일 타입 폐지 — LISTEN 세분화. 03a §2: LISTEN_TEXT·LISTEN_PICTURE 각 1회 포함)
+        val types = mutableListOf(
+            "listenText", "listenPicture", "naming", "naming",
+            "shadowing", "shadowing", "selfTalk", "selfTalk"
+        )
         types.shuffle(rnd)
 
-        // NAMING/SELF_TALK에 쓸 이미지 선택 (요청 이미지 풀에서)
-        // B-3: 백엔드가 타입별 조건 필터 부분집합(namingImageIds/selfTalkImageIds)을 동봉하면
-        //      그 안에서만 선택 — cue 없는 이미지가 NAMING 정답으로 출제되는 것을 방지.
-        //      실컨테이너는 필드 미수신(null) 시 imageList 전체에서 LLM 자율 선택 (계약 유지).
-        val imagePool = request.imageList.toMutableList()
-        val namingIds = request.namingImageIds?.toSet()
-        val selfTalkIds = request.selfTalkImageIds?.toSet()
-        val namingCandidates = imagePool.filter { namingIds == null || it.imageId in namingIds }.toMutableList()
-        val selfTalkCandidates = imagePool.filter { it.imageId in (selfTalkIds ?: emptySet()) }.ifEmpty { imagePool }.toMutableList()
+        // v1.2 계약: 3분할 이미지 풀 — 각 타입 문제는 해당 배열 내에서만 이미지 선택 (03a §2).
+        // NAMING 정답 단어 = imageListNaming의 imageName / SELF_TALK 이미지 = imageListSelfTalk 내 id.
+        val namingCandidates = request.imageListNaming.toMutableList()
+        val selfTalkCandidates = request.imageListSelfTalk.toMutableList()
+        val listenPicturePool = request.imageListListening.toMutableList()
         val namingImages = pickImages(namingCandidates, 2)
         val selfTalkImages = pickImages(selfTalkCandidates, 2)
 
@@ -120,14 +120,29 @@ class StubAiContainerClient : AiContainerClient {
         val problems = types.mapIndexed { idx, type ->
             val turnId = idx + 1
             when (type) {
-                "listen" -> {
+                "listenText" -> {
                     val q = listenQuestions[listenIdx++ % listenQuestions.size]
                     ContainerProblem(
                         turnId = turnId,
                         type = type,
                         ttsPath = ttsPathFor(turnId),
                         passage = q.passage,
+                        // v1.4: listenText 선택지는 텍스트형만 (유형 고정)
                         perType = ContainerPerType(correct = 0, options = q.options.map { ContainerOption("text", it) })
+                    )
+                }
+                "listenPicture" -> {
+                    val q = listenQuestions[listenIdx++ % listenQuestions.size]
+                    // v1.4: listenPicture 선택지는 이미지형만 — imageListListening 배열 내 image_id 사용
+                    val opts = listenPicturePool.take(2).map {
+                        ContainerOption("image", it.imageId.toString())
+                    }
+                    ContainerProblem(
+                        turnId = turnId,
+                        type = type,
+                        ttsPath = ttsPathFor(turnId),
+                        passage = q.passage,
+                        perType = ContainerPerType(correct = 0, options = opts)
                     )
                 }
                 "naming" -> {
@@ -174,7 +189,11 @@ class StubAiContainerClient : AiContainerClient {
         val similarity = similarity(request.problemContext, request.userVoicePath)
         val hintPenalty = request.hintCount * 5
         val score = (similarity - hintPenalty).coerceIn(60, 95)
-        logger.info("[StubContainer] naming 채점: context={}, hintCount={}, score={}", request.problemContext, request.hintCount, score)
+        // userRT: 스텁은 산정 로직 없음 — 첫사용(0) 규약 유지 (0 수신 시 컨테이너가 이번 녹음을 평균으로 간주)
+        logger.info(
+            "[StubContainer] naming 채점: context={}, hintCount={}, userRT={}, score={}",
+            request.problemContext, request.hintCount, request.userRT, score
+        )
         return NamingScoreResponse(
             sessionId = request.sessionId,
             userId = request.userId,
@@ -189,7 +208,8 @@ class StubAiContainerClient : AiContainerClient {
     override fun scoreShadowing(request: ShadowingScoreRequest): ShadowingScoreResponse {
         sleepRandom(800, 1500, "따라말하기 채점")
         val score = rnd.nextInt(26) + 70 // 70~95
-        logger.info("[StubContainer] shadowing 채점: score={}", score)
+        // articulationRate (v1.4): 스텁은 산정 로직 없음 — 첫사용(0) 규약 유지
+        logger.info("[StubContainer] shadowing 채점: articulationRate={}, score={}", request.articulationRate, score)
         return ShadowingScoreResponse(
             sessionId = request.sessionId,
             userId = request.userId,
@@ -275,7 +295,7 @@ class StubAiContainerClient : AiContainerClient {
 
     private fun pickImages(pool: MutableList<com.sesac.speechapp.dto.aicontainer.ContainerImageItem>, n: Int): List<com.sesac.speechapp.dto.aicontainer.ContainerImageItem> {
         val picked = mutableListOf<com.sesac.speechapp.dto.aicontainer.ContainerImageItem>()
-        repeat(2) {
+        repeat(n) {
             if (pool.isNotEmpty()) picked += pool.removeAt(rnd.nextInt(pool.size))
         }
         return picked
@@ -283,9 +303,8 @@ class StubAiContainerClient : AiContainerClient {
 
     /** 정답 단어 vs (가짜)STT 유사도 시뮬레이션 — 60~95 */
     private fun similarity(context: String, voicePath: String): Int {
-        val base = rnd.nextInt(36) + 60
         // 정답 단어가 발화 텍스트(가짜 파일명 기반)에 포함되는 경우 보정 — 실제 STT는 없음
-        return base
+        return rnd.nextInt(36) + 60
     }
 
     private fun randomVoiceEval(): UserVoiceEval = UserVoiceEval(

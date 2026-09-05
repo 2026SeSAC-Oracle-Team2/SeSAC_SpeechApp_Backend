@@ -14,6 +14,9 @@ interface TurnRepository : JpaRepository<Turn, Long> {
     fun countBySessionId(sessionId: Long): Long
     fun findByContentType(contentType: String): List<Turn>
 
+    /** v1.4 articulationRate 산정용 — NAMING/SHADOWING/SELF_TALK 문제풀이 턴 조회 */
+    fun findByContentTypeIn(contentTypes: Collection<String>): List<Turn>
+
     /** 회원탈퇴용 벌크 삭제 (FK 역순 하드딜리트 — B-1) */
     @Modifying
     @Query("DELETE FROM Turn t WHERE t.sessionId IN :sessionIds")

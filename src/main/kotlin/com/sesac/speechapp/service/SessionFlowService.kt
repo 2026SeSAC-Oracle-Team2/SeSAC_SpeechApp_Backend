@@ -94,22 +94,25 @@ class SessionFlowService(
             }
         }
 
-        // B-3: 타입별 조건 필터 — NAMING=SEMANTIC_CUE 보유, SELF_TALK=IMAGE_TAG_PATH 보유.
+        // B-3 → v1.2 계약: 3분할 이미지 풀 (구 imageList+namingImageIds/selfTalkImageIds 폐지).
+        // 분류 규약 (03a §2): IMAGE_TAG_PATH 있음=SELF_TALK / 없음+SEMANTIC_CUE 있음=NAMING / 둘 다 없음=LISTEN.
         // 조건 필터는 백엔드 책임 (03 계약서 §2). 타입별로 2개씩(NAMING 2턴 + SELF_TALK 2턴) 필요하다.
-        val namingPool = imageList.filter { img -> poolImages.any { it.imageId == img.imageId && it.semanticCue != null } }
+        val namingPool = imageList.filter { img -> poolImages.any { it.imageId == img.imageId && it.semanticCue != null && it.imageTagPath.isNullOrBlank() } }
         val selfTalkPool = imageList.filter { img -> poolImages.any { it.imageId == img.imageId && !it.imageTagPath.isNullOrBlank() } }
-        val requiredPerType = 2  // 각 타입 턴 수 (4타입 × 2회)
+        val listenPool = imageList.filter { img -> poolImages.any { it.imageId == img.imageId && it.semanticCue == null && it.imageTagPath.isNullOrBlank() } }
+        val requiredPerType = 2  // 각 타입 턴 수 (NAMING 2회 + SELF_TALK 2회)
 
         // 완화: 조건 충족 풀이 최소 개수에 못 미치면 조건을 완화한 풀로 폴백 + 경고 로그
         // (데모 TEST 테마는 이미지 5~6개뿐 — cue만 있고 tag 없는 이미지가 대부분이라 tag 풀 부족이 정상적인 상태).
-        val relaxed = namingPool.size < requiredPerType || selfTalkPool.size < requiredPerType
+        val relaxed = namingPool.size < requiredPerType || selfTalkPool.size < requiredPerType || listenPool.isEmpty()
         val namingFinal = if (namingPool.size >= requiredPerType) namingPool else imageList
         val selfTalkFinal = if (selfTalkPool.size >= requiredPerType) selfTalkPool else imageList
+        val listenFinal = if (listenPool.isNotEmpty()) listenPool else imageList
         if (relaxed) {
             logger.warn(
-                "[B-3] 조건 이미지 풀 부족 — 필터 완화 (namingPool={}, selfTalkPool={}, 전체={}): " +
+                "[v1.2] 조건 이미지 풀 부족 — 필터 완화 (namingPool={}, selfTalkPool={}, listenPool={}, 전체={}): " +
                     "NAMING 출제 이미지에 cue 없는 이미지가 포함될 수 있음. 관리자 페이지에서 cue/tag 데이터 보충 권장",
-                namingPool.size, selfTalkPool.size, imageList.size
+                namingPool.size, selfTalkPool.size, listenPool.size, imageList.size
             )
         }
 
@@ -117,20 +120,26 @@ class SessionFlowService(
         val profile = user.profile
         val userInfos = ContainerUserInfo(
             nickname = profile?.nickname,
-            likes = profile?.likes,
+            hobbies = profile?.hobbies,
+            tags = null, // TODO(D-5): USER_PROFILE_TAGS 조립 — 이번 세트는 계약 필드만 확정
             sex = profile?.sex,
-            age = profile?.age
+            age = profile?.birthDate?.let { calcAge(it) },
+            userMemory = profile?.userMemory
         )
+        // v1.7: userAQ 출처 = USER_REPRESENTATIVE_SCORES.USER_AQ 캐시 직접 조회 (백엔드 산정식 실행 없음)
         val userAQ = calculateUserAQ(userId)
 
-        // 5) 컨테이너 POST /sessions (스텁 2~3초) — B-3: 타입별 조건 필터 풀 동봉
+        // 5) 컨테이너 POST /sessions (스텁 2~3초) — v1.2: 3분할 풀 동봉
         val containerResponse = aiContainerClient.createSession(
             CreateSessionRequest(
                 sessionId = sessionId,
                 thema = theme,
-                imageList = imageList,
-                namingImageIds = namingFinal.mapNotNull { it.imageId },
-                selfTalkImageIds = selfTalkFinal.mapNotNull { it.imageId },
+                imageListListening = listenFinal.mapNotNull { it.imageId }
+                    .mapNotNull { id -> imageList.firstOrNull { it.imageId == id } },
+                imageListNaming = namingFinal.mapNotNull { it.imageId }
+                    .mapNotNull { id -> imageList.firstOrNull { it.imageId == id } },
+                imageListSelfTalk = selfTalkFinal.mapNotNull { it.imageId }
+                    .mapNotNull { id -> imageList.firstOrNull { it.imageId == id } },
                 userId = userId,
                 userInfos = userInfos,
                 userAQ = userAQ
@@ -146,12 +155,12 @@ class SessionFlowService(
             val turn = Turn(
                 sessionId = sessionId,
                 turnNumber = turnNumber,
-                contentType = toSeedType(problem.type),  // listen→LISTEN, selfTalk→SELF_TALK
+                contentType = toSeedType(problem.type),  // v1.4: listenText→LISTEN_TEXT 등 6종, selfTalk→SELF_TALK
                 status = "PENDING",
                 promptText = problem.passage
             )
             when (problem.type.lowercase()) {
-                "listen" -> {
+                "listentext", "listenpicture" -> {
                     val perType = problem.perType
                         ?: throw IllegalStateException("LISTEN 문제에 perType 없음 (turnId=${problem.turnId})")
                     val options = perType.options
@@ -216,7 +225,7 @@ class SessionFlowService(
                 type = turn.contentType,
                 ttsUrl = voiceRecordId?.let { "/api/v1/voice/$it" },
                 passage = problem.passage,
-                choices = if (turn.contentType == "LISTEN") deserializeChoices(turn.choicesJson) else null,
+                choices = if (turn.contentType == "LISTEN_TEXT" || turn.contentType == "LISTEN_PICTURE") deserializeChoices(turn.choicesJson) else null,
                 imageId = when (turn.contentType) {
                     "SELF_TALK" -> problem.perType?.image
                     "NAMING" -> namingImageId
@@ -241,7 +250,7 @@ class SessionFlowService(
     @Transactional
     fun submitListen(sessionId: Long, turnId: Long, selected: Int): ListenSubmitData {
         val turn = getTurn(sessionId, turnId)
-        require(turn.contentType == "LISTEN") { "LISTEN 턴이 아닙니다" }
+        require(turn.contentType == "LISTEN_TEXT" || turn.contentType == "LISTEN_PICTURE") { "LISTEN 턴이 아닙니다 (${turn.contentType})" }
 
         val correctRef = turn.correctValue
             ?: throw IllegalStateException("LISTEN 정답 미생성 턴입니다 (turnId=$turnId)")
@@ -273,7 +282,8 @@ class SessionFlowService(
                 problemContext = turn.correctValue ?: "",
                 userVoicePath = objectKey,
                 hintCount = turn.hintsShown ?: 0,
-                userRT = calculateUserRT(userId)
+                // v1.4: 0개(첫사용)면 0 전송 — 구 null 폐지
+                userRT = calculateUserRT(userId) ?: BigDecimal.ZERO
             )
         )
         return applyScoredResult(turn, sessionId, userId, objectKey, response.scoreNaming, response.userVoiceEval)
@@ -293,7 +303,9 @@ class SessionFlowService(
                 sessionId = sessionId,
                 userId = userId,
                 problemContext = turn.correctValue ?: turn.promptText ?: "",
-                userVoicePath = objectKey
+                userVoicePath = objectKey,
+                // v1.4: 조음속도 — 0개(첫사용)면 0 전송. 산정 로직 자체는 D-5 대상
+                articulationRate = calculateArticulationRate(userId) ?: BigDecimal.ZERO
             )
         )
         return applyScoredResult(turn, sessionId, userId, objectKey, response.scoreShadowing, response.userVoiceEval)
@@ -438,9 +450,11 @@ class SessionFlowService(
                 userId = userId,
                 userInfos = ContainerUserInfo(
                     nickname = user.profile?.nickname,
-                    likes = user.profile?.likes,
+                    hobbies = user.profile?.hobbies,
+                    tags = null, // TODO(D-5): USER_PROFILE_TAGS 조립
                     sex = user.profile?.sex,
-                    age = user.profile?.age
+                    age = user.profile?.birthDate?.let { calcAge(it) },
+                    userMemory = user.profile?.userMemory
                 ),
                 turnResults = buildTurnResults(sessionId),
                 context = context,
@@ -574,14 +588,18 @@ class SessionFlowService(
                 )
             }
 
-    /** 컨테이너 소문자 타입 → DB seed 코드 (listen→LISTEN, selfTalk→SELF_TALK) */
+    /** 컨테이너 소문자 타입 → DB seed 코드 (v1.4: listenText→LISTEN_TEXT, listenPicture→LISTEN_PICTURE, selfTalk→SELF_TALK) */
     private fun toSeedType(containerType: String): String = when (containerType.lowercase()) {
         "selftalk", "self_talk" -> "SELF_TALK"
+        "listentext" -> "LISTEN_TEXT"
+        "listenpicture" -> "LISTEN_PICTURE"
         else -> containerType.uppercase()
     }
 
     private fun toContainerType(seedCode: String): String = when (seedCode) {
         "SELF_TALK" -> "selfTalk"
+        "LISTEN_TEXT" -> "listenText"
+        "LISTEN_PICTURE" -> "listenPicture"
         else -> seedCode.lowercase()
     }
 
@@ -594,7 +612,7 @@ class SessionFlowService(
 
     /**
      * userRT (§10): 최근 NAMING 음성 20개 중 발화시간/음절수 최단 10개의 (발화시간 총합 ÷ 음절수 총합).
-     * 대상 0개면 null.
+     * 대상 0개면 null — 호출부에서 0 전송 (v1.4: 구 null 전송 폐지).
      */
     private fun calculateUserRT(userId: Long): BigDecimal? {
         val namingTurnIds = turnRepository.findByContentType("NAMING").map { it.id }.toSet()
@@ -611,8 +629,35 @@ class SessionFlowService(
         return speakingSum.divide(syllableSum, 6, RoundingMode.HALF_UP)
     }
 
+    /**
+     * articulationRate (v1.4): 최근 문제풀이(NAMING/SHADOWING/SELF_TALK) 유저 음성 중
+     * SYLLABLES NOT NULL·ARTICULATION_TIME > 0인 것 20개 중 조음속도(ARTICULATION_TIME÷SYLLABLES)
+     * 최단(가장 빠른) 10개의 (SYLLABLES 총합 ÷ ARTICULATION_TIME 총합), 소수 2자리.
+     * 대상 0개면 null — 호출부에서 0 전송 (첫사용 규약).
+     * ⚠️ 본 산정식 전면 적용은 D-5 대상 — 이번 세트는 시그니처 정합(계약 DTO 필드 충족)만.
+     */
+    private fun calculateArticulationRate(userId: Long): BigDecimal? {
+        val voicedTypeTurnIds = turnRepository.findByContentTypeIn(listOf("NAMING", "SHADOWING", "SELF_TALK"))
+            .map { it.id }.toSet()
+        val records = voiceRecordRepository.findByUserId(userId)
+            .filter { it.speaker == "USER" && it.turnId in voicedTypeTurnIds }
+            .filter { (it.syllables ?: 0) > 0 && it.articulationTime != null && it.articulationTime!!.signum() > 0 }
+        if (records.isEmpty()) return null
+        val top10 = records
+            .sortedBy { it.articulationTime!!.divide(BigDecimal(it.syllables!!), 6, RoundingMode.HALF_UP) }
+            .take(10)
+        val syllableSum = top10.fold(BigDecimal.ZERO) { acc, r -> acc + BigDecimal(r.syllables!!) }
+        val articulationSum = top10.fold(BigDecimal.ZERO) { acc, r -> acc + r.articulationTime!! }
+        if (articulationSum.signum() == 0) return null
+        return syllableSum.divide(articulationSum, 2, RoundingMode.HALF_UP)
+    }
+
+    /** BIRTH_DATE 기반 나이 산정 (03a §1.1 — 구 AGE 컬럼 폐지 대체) */
+    private fun calcAge(birthDate: java.time.LocalDate): Int =
+        java.time.Period.between(birthDate, java.time.LocalDate.now()).years
+
     private fun stubTtsFile(contentType: String): String = when (contentType) {
-        "LISTEN" -> "tts_listen.mp3"
+        "LISTEN_TEXT", "LISTEN_PICTURE" -> "tts_listen.mp3"
         "NAMING" -> "tts_naming.mp3"
         "SHADOWING" -> "tts_shadowing.mp3"
         else -> "tts_hello.mp3"
