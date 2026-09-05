@@ -14,6 +14,7 @@ import com.sesac.speechapp.dto.aicontainer.ShadowingScoreRequest
 import com.sesac.speechapp.dto.aicontainer.ShadowingScoreResponse
 import com.sesac.speechapp.dto.aicontainer.TotalReportRequest
 import com.sesac.speechapp.dto.aicontainer.TotalReportResponse
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
@@ -21,7 +22,9 @@ import org.springframework.web.client.RestClient
 /**
  * 실제 AI 컨테이너 호출 클라이언트 (ai.container.mode=real).
  *
- * ⚠️ TODO: AI 컨테이너(FastAPI) 배포 후 활성화. 계약서 03의 엔드포인트/바디 그대로.
+ * ⚠️ AI 컨테이너(FastAPI) 배포 후 활성화 (D-8⑤). 계약서 03의 엔드포인트/바디 그대로.
+ *  - base-url: application.yml ai.container.base-url 주입 (D-8② 하드코딩 제거 —
+ *    기본값 localhost:8000 유지). 실제 전환은 여전히 ai.container.mode=real로만.
  *  - 타임아웃/에러 규약은 미정(고도화 과제) — 데모 단계에서는 컨테이너 가용성 가정.
  *  - 음성 파일은 HTTP로 보내지 않는다: 공유폴더 경로(docker compose volume)만 전달.
  *
@@ -31,12 +34,12 @@ import org.springframework.web.client.RestClient
 @Component
 @ConditionalOnProperty(name = ["ai.container.mode"], havingValue = "real")
 class RealAiContainerClient(
-    builder: RestClient.Builder
+    builder: RestClient.Builder,
+    @Value("\${ai.container.base-url:http://localhost:8000}") baseUrl: String
 ) : AiContainerClient {
 
-    // TODO: base-url을 application.yml ai.container.base-url 로 주입
     private val restClient: RestClient = builder
-        .baseUrl("http://localhost:8000")
+        .baseUrl(baseUrl)
         .build()
 
     override fun createSessionToday(request: CreateSessionRequest): CreateSessionResponse =

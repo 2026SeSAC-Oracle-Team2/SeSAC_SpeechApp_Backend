@@ -109,10 +109,12 @@ oci:
     config-path: ${OCI_CONFIG_PATH:~/.oci/config}
     config-profile: DEFAULT
 
-# AI 컨테이너 클라이언트 모드 (stub: 데모용 스텁 / real: 실제 FastAPI 호출)
+# AI 컨테이너 클라이언트 (stub: 데모용 스텁 / real: 실제 FastAPI 호출)
+# base-url: 실컨테이너 주소 — D-8⑤ 배포 시 환경값으로 교체 (기본값 로컬 호스트)
 ai:
   container:
     mode: stub
+    base-url: ${AI_CONTAINER_BASE_URL:http://localhost:8000}
 
 # 데모 세션 플로우 설정
 demo:

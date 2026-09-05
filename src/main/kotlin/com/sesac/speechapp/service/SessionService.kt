@@ -20,9 +20,4 @@ class SessionService(
         return sessionRepository.save(session)
     }
 
-    fun getNextTurnNumber(sessionId: Long): Int {
-        // TODO: 실제 구현은 TurnRepository에서 COUNT + 1
-        // 지금은 단순히 1부터 시작
-        return 1
-    }
 }
