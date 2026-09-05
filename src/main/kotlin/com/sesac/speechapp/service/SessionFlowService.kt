@@ -27,6 +27,7 @@ import com.sesac.speechapp.entity.Turn
 import com.sesac.speechapp.entity.TurnImage
 import com.sesac.speechapp.entity.VoiceRecord
 import com.sesac.speechapp.repository.AppUserRepository
+import com.sesac.speechapp.repository.UserProfileRepository
 import com.sesac.speechapp.repository.ImageResourceRepository
 import com.sesac.speechapp.repository.ImageThemaRepository
 import com.sesac.speechapp.repository.SessionRepository
@@ -58,6 +59,7 @@ class SessionFlowService(
     private val imageThemaRepository: ImageThemaRepository,
     private val imageResourceRepository: ImageResourceRepository,
     private val appUserRepository: AppUserRepository,
+    private val userProfileRepository: UserProfileRepository,
     private val objectStorageService: ObjectStorageService,
     @Value("\${demo.talk-turn-limit:3}") private val talkTurnLimit: Int,
     @Value("\${demo.themes:TEST}") private val demoThemes: String
@@ -509,16 +511,35 @@ class SessionFlowService(
     // ============================================================
     // 4.6 세션 종료 + 리포트 — 동기 응답
     // ============================================================
+    /**
+     * D-4 [2.3]: /report/total userMemory 라이프사이클 (03a §7.2+§10).
+     * ⚠️ 이번 범위는 "동기 finish 1회 호출"에 userMemory 규약을 붙이는 것 —
+     * /report/problems·total 2단계 분리는 D-5. 이 메서드를 쪼개지 않는다.
+     * D-5에서 2단계 재편 시 userMemory 갱신은 total 경로로 이동 (이관 경계).
+     *
+     * 갱신 규약 (§10.1):
+     *  - 응답 userMemory null·누락 → 기존값 유지 (소실 방지 — 다음 세션 재시도)
+     *  - 길이 > 8192문자 → 절단 저장 (하드캡 — CLOB LENGTH()는 문자 수 기준)
+     *  - 정상 → UPDATE (같은 트랜잭션)
+     *  - 기존 로직(AQ+피드백 6컬럼) 유지
+     *  - 컨테이너 호출 실패 시 전체 롤백이 정상 (@Transactional — "실패 시 기존값 유지"는
+     *    응답 수신 후의 규약)
+     */
     @Transactional
     fun finishSession(sessionId: Long, userId: Long): FinishData {
         val session = sessionRepository.findById(sessionId)
             .orElseThrow { IllegalArgumentException("존재하지 않는 세션입니다: $sessionId") }
 
-        // 컨테이너 /report (스텁 2~3초)
+        // ① USER_PROFILE.USER_MEMORY 현재값 조회 (갱신 기준값 — 첫 세션이면 null)
+        val profile = userProfileRepository.findByUserId(userId)
+        val existingMemory = profile?.userMemory
+
+        // ② 컨테이너 호출 (기존값 포함)
         val response = aiContainerClient.generateReport(
             ReportRequest(
                 sessionId = sessionId,
                 userId = userId,
+                userMemory = existingMemory,
                 turns = buildTurnResults(sessionId),
                 talkContext = buildTalkContext(sessionId)
             )
@@ -533,6 +554,34 @@ class SessionFlowService(
         session.totalFeedback = response.sessionFeedbacks.totalFeedback
         session.status = "COMPLETED"
 
+        // ③ userMemory 갱신 규약: null·누락 → 기존값 유지(소실 방지) /
+        //    길이 > 8192문자 → 절단 저장(하드캡) / 정상 → UPDATE (같은 트랜잭션)
+        val returnedMemory = response.userMemory
+        if (returnedMemory != null) {
+            val capped = if (returnedMemory.length > USER_MEMORY_HARD_CAP) {
+                logger.info(
+                    "[D-4] userMemory 하드캡 절단: {}자 → {}자 (문자 수 기준)",
+                    returnedMemory.length, USER_MEMORY_HARD_CAP
+                )
+                returnedMemory.take(USER_MEMORY_HARD_CAP)
+            } else {
+                returnedMemory
+            }
+            if (profile != null) {
+                profile.userMemory = capped
+                userProfileRepository.save(profile)
+                logger.info(
+                    "[D-4] userMemory 갱신 완료: sessionId={}, 기존={}자 → 신규={}자",
+                    sessionId, existingMemory?.length ?: 0, capped.length
+                )
+            } else {
+                // 프로필 행 부재 — 예외 케이스(가입 플로우상 항상 존재). 갱신 스킵+경고 (소실 방지 우선)
+                logger.warn("[D-4] USER_PROFILE 행 부재로 userMemory 갱신 스킵: userId={}", userId)
+            }
+        } else {
+            logger.info("[D-4] userMemory 응답 null — 기존값 유지 (소실 방지): sessionId={}", sessionId)
+        }
+
         return FinishData(
             sessionAQ = response.sessionAQ,
             feedbacks = FeedbacksDto(
@@ -544,6 +593,14 @@ class SessionFlowService(
                 totalFeedback = session.totalFeedback
             )
         )
+    }
+
+    companion object {
+        /**
+         * USER_MEMORY 하드캡 (04 v2.6 §4.2): 8KB = 8192 **문자** 기준.
+         * ⚠️ CLOB LENGTH()는 문자 수 — UTF-8 바이트와 다름. 절단·실측 모두 문자 수로 통일.
+         */
+        const val USER_MEMORY_HARD_CAP = 8192
     }
 
     // ============================================================

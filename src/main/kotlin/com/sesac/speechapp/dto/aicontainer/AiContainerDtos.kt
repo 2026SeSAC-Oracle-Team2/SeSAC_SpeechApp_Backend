@@ -15,6 +15,10 @@ import java.math.BigDecimal
  *   3분할 imageListListening/Naming/SelfTalk (03a v1.2 계약)
  * - ShadowingScoreRequest: articulationRate 신설 (03a §5)
  * - NamingScoreRequest.userRT: 0개(첫사용)면 0 전송 — 구 null 폐지 (03a §4)
+ *
+ * v1.8 (D-4, 2026-09-05) 변경:
+ * - ReportRequest.userMemory: String? 신설 — 기존 누적값 전달 (03a §7.2/§10)
+ * - ReportResponse.userMemory: String? 신설 — 갱신값 (소득 없음=요청값 동일 반환)
  */
 
 // ============================================================
@@ -193,6 +197,8 @@ data class AiChatResponse(
 data class ReportRequest(
     @JsonProperty("sessionID") val sessionId: Long,
     @JsonProperty("userID") val userId: Long,
+    // D-4 [2.1] (03a §7.2): 기존 누적 userMemory — 갱신 기준값. 첫 세션/기존 없으면 null.
+    @JsonProperty("userMemory") val userMemory: String? = null,
     @JsonProperty("turns") val turns: List<TurnResult>,
     @JsonProperty("talkContext") val talkContext: List<ChatMessage>
 )
@@ -209,6 +215,9 @@ data class SessionFeedbacks(
 data class ReportResponse(
     @JsonProperty("sessionID") val sessionId: Long,
     @JsonProperty("userID") val userId: Long,
+    // D-4 [2.2] (03a §7.2): 갱신된 userMemory — 갱신할 소득 없으면 요청값과 동일 반환.
+    // 실패·누락·null → 백엔드는 기존 값 유지 (소실 방지, §10 규약).
+    @JsonProperty("userMemory") val userMemory: String? = null,
     @JsonProperty("sessionAQ") val sessionAQ: Int,   // 100점 만점 정수
     @JsonProperty("sessionFeedbacks") val sessionFeedbacks: SessionFeedbacks
 )
