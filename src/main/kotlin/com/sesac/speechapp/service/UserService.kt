@@ -310,18 +310,11 @@ class UserService(
      * - tags: USER_PROFILE_TAGS → TAGS 조인 후 쉼표 문자열 (03a §1.1 형식 "등산, 골프")
      *   ⚠️ UPS.USER_ID FK → APP_USER.ID (FK_UPT_USER 실측) — 키는 user.id
      * - userAq: REP_SCORES.USER_ID FK → USER_PROFILE.USER_ID (= APP_USER.ID 값, FK_REP_SCORES_USER 실측) — null 허용
-     *   (/sessions userInfos 주입은 D-5 — 이번엔 DTO 응답만)
      */
     fun toDto(user: AppUser): UserDto {
         val profile = user.profile
         val userId = requireNotNull(user.id) { "사용자 ID 누락: ${user.uuid}" }
         val userAq = userRepresentativeScoreRepository.findByUserId(userId)?.userAq
-        // 단일 findAllById로 태그명 조회 (루프 findById N+1 회피), 순서는 연결행 tagId 순 유지
-        val tagRels = userProfileTagRepository.findByUserIdOrderByTagIdAsc(userId)
-        val tagNames: Map<Long, String> = if (tagRels.isEmpty()) emptyMap() else
-            tagRepository.findAllById(tagRels.map { it.tagId })
-                .associate { requireNotNull(it.tagId) to it.tag }
-        val tags = tagRels.mapNotNull { tagNames[it.tagId] }.joinToString(", ")
 
         return UserDto(
             id = userId,
@@ -332,12 +325,28 @@ class UserService(
             hobbies = profile?.hobbies,
             sex = profile?.sex,
             birthDate = profile?.birthDate?.toString(),
-            tags = tags.ifEmpty { null },
+            tags = buildTagsString(userId).ifEmpty { null },
             userAq = userAq,
             level = 1,
             // LocalDateTime → Instant 변환은 반드시 atZone(...).toInstant() 사용
             // (Instant.from(LocalDateTime)은 UnsupportedTemporalTypeException 발생)
             createdAt = user.createdAt?.atZone(ZoneId.systemDefault())?.toInstant()
         )
+    }
+
+    /**
+     * D-4 [1.1]: 태그 조립 헬퍼 — USER_PROFILE_TAGS → TAGS 조립 후 쉼표 문자열 (03a §1.1 형식).
+     * 연결이 없으면 빈 문자열 반환 (호출부가 null/빈값 처리).
+     * - 순서: tag_id 오름차순 (findByUserIdOrderByTagIdAsc)
+     * - N+1 회피: 단일 findAllById로 태그명 일괄 조회 (toDto 선례 패턴 재사용)
+     * - 사용처: toDto(GET/PATCH /me 응답) + SessionFlowService userInfos.tags 주입
+     *   (/sessions·/aichat — 03a §1.1 userInfos 규약)
+     */
+    fun buildTagsString(userId: Long): String {
+        val tagRels = userProfileTagRepository.findByUserIdOrderByTagIdAsc(userId)
+        if (tagRels.isEmpty()) return ""
+        val tagNames: Map<Long, String> = tagRepository.findAllById(tagRels.map { it.tagId })
+            .associate { requireNotNull(it.tagId) to it.tag }
+        return tagRels.mapNotNull { tagNames[it.tagId] }.joinToString(", ")
     }
 }

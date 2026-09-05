@@ -60,6 +60,7 @@ class SessionFlowService(
     private val imageResourceRepository: ImageResourceRepository,
     private val appUserRepository: AppUserRepository,
     private val userProfileRepository: UserProfileRepository,
+    private val userService: UserService,
     private val objectStorageService: ObjectStorageService,
     @Value("\${demo.talk-turn-limit:3}") private val talkTurnLimit: Int,
     @Value("\${demo.themes:TEST}") private val demoThemes: String
@@ -79,7 +80,17 @@ class SessionFlowService(
         val theme = demoThemes.split(",").map { it.trim() }.filter { it.isNotEmpty() }.random()
 
         // 2) LEARNING_SESSION INSERT
-        val session = Session(userId = userId, theme = theme, status = "IN_PROGRESS")
+        // D-4 [3.1]: type/session_name 세팅 (D-2 잔여 — 컬럼은 D-1에 이미 존재).
+        // type="today" — theme 분기(/sessions/theme)는 D-5, 컬럼과 이름 규약은 지금부터 적재.
+        // sessionName="오늘의 학습 - {테마명}" — 학습 기록 카드 표시명 (04 v2.6 §4.4).
+        // STATUS는 IN_PROGRESS 유지 (COMPLETED_NO_TALK 판정은 D-5).
+        val session = Session(
+            userId = userId,
+            theme = theme,
+            type = "today",
+            sessionName = "오늘의 학습 - $theme",
+            status = "IN_PROGRESS"
+        )
         sessionRepository.save(session)
         val sessionId = session.id ?: throw IllegalStateException("세션 ID 발급 실패")
 
@@ -123,7 +134,9 @@ class SessionFlowService(
         val userInfos = ContainerUserInfo(
             nickname = profile?.nickname,
             hobbies = profile?.hobbies,
-            tags = null, // TODO(D-5): USER_PROFILE_TAGS 조립 — 이번 세트는 계약 필드만 확정
+            // D-4 [1.2]: USER_PROFILE_TAGS 조립 주입 완성 — UserService.buildTagsString 재사용
+            // (tag_id 오름차순, 쉼표 문자열, N+1 회피 — toDto와 동일 로직으로 일관성)
+            tags = userService.buildTagsString(userId).ifEmpty { null },
             sex = profile?.sex,
             age = profile?.birthDate?.let { calcAge(it) },
             userMemory = profile?.userMemory
@@ -453,7 +466,8 @@ class SessionFlowService(
                 userInfos = ContainerUserInfo(
                     nickname = user.profile?.nickname,
                     hobbies = user.profile?.hobbies,
-                    tags = null, // TODO(D-5): USER_PROFILE_TAGS 조립
+                    // D-4 [1.2]: tags 주입 완성 — createSession과 동일 헬퍼 재사용 (일관성)
+                    tags = userService.buildTagsString(userId).ifEmpty { null },
                     sex = user.profile?.sex,
                     age = user.profile?.birthDate?.let { calcAge(it) },
                     userMemory = user.profile?.userMemory
