@@ -231,7 +231,9 @@ class UserService(
         val firebaseUid = user.firebaseUid
         val userId = requireNotNull(user.id) { "사용자 ID 누락: $userUuid" }
 
-        // FK 역순 하드딜리트 (B-1): TURN_IMAGE → VOICE_RECORD → TURN → LEARNING_SESSION → USER_PROFILE → APP_USER
+        // FK 역순 하드딜리트 (B-1 + D-3 [5]):
+        // TURN_IMAGE → VOICE_RECORD → TURN → LEARNING_SESSION → USER_PROFILE_TAGS →
+        // USER_REPRESENTATIVE_SCORES → USER_PROFILE → APP_USER
         // JPQL 벌크 삭제는 영속성 컨텍스트를 우회하므로 즉시 SQL 실행 — 순서만 지키면 FK 안전.
         val sessionIds = sessionRepository.findByUserIdOrderByCreatedAtDesc(userId).mapNotNull { it.id }
         val turnIds = sessionIds.flatMap { sid -> turnRepository.findBySessionIdOrderByTurnNumberAsc(sid).mapNotNull { it.id } }
@@ -249,8 +251,10 @@ class UserService(
             turnRepository.deleteBySessionIds(sessionIds)   // 3) TURN
             sessionRepository.deleteBySessionIds(sessionIds) // 4) LEARNING_SESSION
         }
-        user.profile?.let { userProfileRepository.delete(it) } // 5) USER_PROFILE
-        appUserRepository.delete(user)                       // 6) APP_USER
+        userProfileTagRepository.deleteByUserId(userId)      // 5) USER_PROFILE_TAGS (D-1 신설 — APP_USER 자식)
+        userRepresentativeScoreRepository.deleteByUserId(userId) // 6) USER_REPRESENTATIVE_SCORES (PROFILE 삭제 전 필수)
+        user.profile?.let { userProfileRepository.delete(it) } // 7) USER_PROFILE
+        appUserRepository.delete(user)                       // 8) APP_USER
         appUserRepository.flush() // 제약 위반 시 즉시 예외 → 트랜잭션 롤백
 
         logger.info(
