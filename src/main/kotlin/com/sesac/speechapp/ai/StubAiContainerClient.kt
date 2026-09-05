@@ -34,6 +34,10 @@ import kotlin.random.Random
  *
  * 지연 (지시문 v1.97):
  *  - 세션 문제 생성 2~3초 / 답안 채점 0.8~1.5초 / 이야기 턴 1~2초 / 리포트 2~3초
+ *
+ * v1.8 (D-4, 2026-09-05): generateReport에 userMemory 반환 추가 (§9 차이표 갱신) —
+ * 기존값 있으면 기존+더미 신규 문장 / null이면 더미 신규 작성 (갱신 시뮬레이션).
+ * aichat에는 userMemory 넣지 않음 — 갱신 지점은 /report/total 유일 (03a §10).
  */
 @Component
 @ConditionalOnProperty(name = ["ai.container.mode"], havingValue = "stub", matchIfMissing = true)
@@ -255,6 +259,7 @@ class StubAiContainerClient : AiContainerClient {
             aiChatReplies.random(rnd)
         }
         logger.info("[StubContainer] aichat: first={}, contextSize={}, userText={}", isFirst, request.context.size, userText)
+        // D-4 주의: aichat 응답에는 userMemory를 넣지 않는다 (§10 — 갱신 지점은 /report/total 유일)
         return AiChatResponse(
             sessionId = request.sessionId,
             userId = request.userId,
@@ -264,7 +269,7 @@ class StubAiContainerClient : AiContainerClient {
     }
 
     // ------------------------------------------------------------
-    // §9 POST /report
+    // §7.2 POST /report/total — 리포트 + userMemory 갱신 반환 (D-4 [4])
     // ------------------------------------------------------------
     override fun generateReport(request: ReportRequest): ReportResponse {
         sleepRandom(2000, 3000, "리포트 생성")
@@ -279,10 +284,26 @@ class StubAiContainerClient : AiContainerClient {
             talkFeedback = "자유 대화에 적극적으로 참여하셨습니다. 긴 문장으로 이야기하시는 모습이 좋았어요.",
             totalFeedback = "전반적으로 ${avg}점 수준의 안정적인 발화를 보였습니다. 꾸준한 연습으로 긴 문장과 어휘 다양성을 키워가세요. (세션 AQ: ${aq})"
         )
-        logger.info("[StubContainer] 리포트 생성: AQ={}", aq)
+
+        // D-4 [4]: userMemory 갱신 시뮬레이션 (03a §9 — 실컨테이너 흐름 사전 검증용).
+        // - 기존값 있으면 "기존값 + 더미 신규 문장" 반환 (갱신 시뮬레이션)
+        // - null이면 더미 신규 작성 (첫 세션) — 11a 선언형 짧은 문장 스타일
+        // - 갱신 지점은 /report/total 유일 (§10) — aichat 응답에는 userMemory를 넣지 않는다
+        val existing = request.userMemory
+        val newSentence = "- 오늘 학습 대화에서 카페와 커피 이야기를 좋아한다 (더미: ${request.sessionId})"
+        val updatedMemory = if (existing != null) {
+            "$existing\n$newSentence"
+        } else {
+            "- 첫 대화에서 문제 풀이를 차분히 수행했다\n- 카페와 일상 이야기에 흥얼거림이 보인다\n$newSentence"
+        }
+        logger.info(
+            "[StubContainer] 리포트 생성: AQ={}, userMemory 기존={}자 → 반환={}자",
+            aq, existing?.length ?: 0, updatedMemory.length
+        )
         return ReportResponse(
             sessionId = request.sessionId,
             userId = request.userId,
+            userMemory = updatedMemory,
             sessionAQ = aq,
             sessionFeedbacks = feedbacks
         )
