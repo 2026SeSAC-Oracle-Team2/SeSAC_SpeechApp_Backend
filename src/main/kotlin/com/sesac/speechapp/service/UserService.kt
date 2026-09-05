@@ -1,6 +1,7 @@
 package com.sesac.speechapp.service
 
 import com.sesac.speechapp.dto.ScoresResponse
+import com.sesac.speechapp.dto.StatsResponse
 import com.sesac.speechapp.dto.session.SessionHistoryItem
 import com.sesac.speechapp.dto.session.SessionHistoryResponse
 import com.sesac.speechapp.dto.SurveyRequest
@@ -28,6 +29,8 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.transaction.support.TransactionSynchronization
 import org.springframework.transaction.support.TransactionSynchronizationManager
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -230,6 +233,63 @@ class UserService(
         )
     }
 
+    /**
+     * 홈 통계 조회 (D-8②b — 05a §8.4).
+     * - streak: 완료 세션(공용 프레디케이트)의 CREATED_AT 날짜(서버 로컬 KST) 집합 →
+     *   오늘 또는 어제부터 소급해 하루라도 끊기면 중단. 오늘/어제 모두 없으면 0.
+     *   오늘 완료분이 없어도 어제까지 연속이면 유지(오늘 아직 학습 전 = 0 아님).
+     * - avgScore: 최근 10개 완료 세션 AQ 평균 (소수 1자리) — 10개 미만이면 보유분 평균, 0개면 null.
+     *   ⚠️ ADR-009 대표점수(최근 20 상위 10)와 다른 식 — "최근 10개 전부 평균".
+     * - deltaScore: 최근 10개 평균 − 11~20번째 평균 (소수 1자리). 11번째 이상 없으면 null.
+     */
+    @Transactional(readOnly = true)
+    fun getStats(userUuid: String): StatsResponse {
+        val user = appUserRepository.findByUuid(userUuid)
+            ?: throw IllegalArgumentException("사용자를 찾을 수 없습니다: $userUuid")
+        val userId = requireNotNull(user.id) { "사용자 ID 누락: $userUuid" }
+
+        val completed = sessionRepository.findByUserIdOrderByCreatedAtDesc(userId)
+            .filter { CompletedSessionFilter.isCompletedWithAq(it) }
+
+        // ── streak ──
+        // 서버 로컬 타임존(Asia/Seoul, TZ unset → OS 따름) 기준 LocalDate — 세션 생성과 동일 기준.
+        val today = LocalDate.now()
+        val completionDays = completed.mapNotNull { it.createdAt?.toLocalDate() }.toSet()
+        var streakDays = 0
+        if (today in completionDays || today.minusDays(1) in completionDays) {
+            var cursor = if (today in completionDays) today else today.minusDays(1)
+            while (cursor in completionDays) {
+                streakDays++
+                cursor = cursor.minusDays(1)
+            }
+        }
+
+        // ── avgScore / deltaScore ──
+        val aqs = completed.mapNotNull { it.aq } // CREATED_AT DESC 정렬 유지 — 최근순
+        val recent10 = aqs.take(10)
+        val avgScore = if (recent10.isEmpty()) {
+            null
+        } else {
+            recent10.map { BigDecimal(it) }.reduce { acc, d -> acc + d }
+                .divide(BigDecimal(recent10.size), 1, RoundingMode.HALF_UP)
+        }
+        val prev10 = aqs.drop(10).take(10)
+        val deltaScore = if (prev10.size == 10 && avgScore != null) {
+            val prevAvg = prev10.map { BigDecimal(it) }.reduce { acc, d -> acc + d }
+                .divide(BigDecimal(10), 1, RoundingMode.HALF_UP)
+            avgScore - prevAvg
+        } else {
+            null
+        }
+
+        logger.info(
+            "홈 통계 조회: uuid={}, completed={}, streak={}, avg={}, delta={}",
+            userUuid, completed.size, streakDays, avgScore, deltaScore
+        )
+        return StatsResponse(streakDays = streakDays, avgScore = avgScore, deltaScore = deltaScore)
+    }
+
+    /** 태그 마스터 15종 조회 (D-3 [2] — 05a §2). order by tagId */
     /** 태그 마스터 15종 조회 (D-3 [2] — 05a §2). order by tagId */
     @Transactional(readOnly = true)
     fun getTags(): TagsResponse {

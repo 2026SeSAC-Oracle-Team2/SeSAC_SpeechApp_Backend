@@ -7,6 +7,7 @@ import com.sesac.speechapp.dto.TagsResponse
 import com.sesac.speechapp.dto.SurveyRequest
 import com.sesac.speechapp.dto.SurveyResponse
 import com.sesac.speechapp.dto.ScoresResponse
+import com.sesac.speechapp.dto.StatsResponse
 import com.sesac.speechapp.dto.session.SessionHistoryResponse
 import com.sesac.speechapp.service.ObjectStorageService
 import com.sesac.speechapp.service.UserService
@@ -77,6 +78,19 @@ class UserController(
         @AuthenticationPrincipal userUuid: String
     ): ResponseEntity<ApiResponse<ScoresResponse>> {
         val result = userService.getScores(userUuid)
+        return ResponseEntity.ok(ApiResponse.success(result))
+    }
+
+    /**
+     * 홈 통계 조회 (D-8②b — 05a §8.4): JWT 필수 — @AuthenticationPrincipal userUuid.
+     * 응답: {streakDays, avgScore(소수1자리|null), deltaScore(소수1자리|null)}.
+     * 산정 규약은 UserService.getStats KDoc + 05a §8.4 참조.
+     */
+    @GetMapping("/me/stats")
+    fun getMyStats(
+        @AuthenticationPrincipal userUuid: String
+    ): ResponseEntity<ApiResponse<StatsResponse>> {
+        val result = userService.getStats(userUuid)
         return ResponseEntity.ok(ApiResponse.success(result))
     }
 
