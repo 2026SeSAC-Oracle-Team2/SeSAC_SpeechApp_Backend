@@ -13,14 +13,22 @@ import com.sesac.speechapp.dto.aicontainer.SelfTalkScoreRequest
 import com.sesac.speechapp.dto.aicontainer.ShadowingScoreRequest
 import com.sesac.speechapp.dto.aicontainer.TotalReportRequest
 import com.sesac.speechapp.dto.aicontainer.TurnResult
+import com.sesac.speechapp.dto.session.AnswerDto
 import com.sesac.speechapp.dto.session.ChoiceDto
 import com.sesac.speechapp.dto.session.FeedbacksDto
 import com.sesac.speechapp.dto.session.FinishData
 import com.sesac.speechapp.dto.session.HintData
 import com.sesac.speechapp.dto.session.ListenSubmitData
 import com.sesac.speechapp.dto.session.ListenSubmitRequest
+import com.sesac.speechapp.dto.session.MetricCardDto
+import com.sesac.speechapp.dto.session.MetricTurnDto
+import com.sesac.speechapp.dto.session.RadarDto
 import com.sesac.speechapp.dto.session.SessionCreateData
+import com.sesac.speechapp.dto.session.SessionHistoryItem
+import com.sesac.speechapp.dto.session.SessionHistoryResponse
+import com.sesac.speechapp.dto.session.SessionReportData
 import com.sesac.speechapp.dto.session.TalkData
+import com.sesac.speechapp.dto.session.TalkHistoryItem
 import com.sesac.speechapp.dto.session.TurnDto
 import com.sesac.speechapp.dto.session.UserVoiceEvalDto
 import com.sesac.speechapp.dto.session.VoiceSubmitData
@@ -37,9 +45,12 @@ import com.sesac.speechapp.repository.TurnImageRepository
 import com.sesac.speechapp.repository.TurnRepository
 import com.sesac.speechapp.repository.UserRepresentativeScoreRepository
 import com.sesac.speechapp.repository.VoiceRecordRepository
+import org.springframework.transaction.support.TransactionSynchronization
+import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.multipart.MultipartFile
 import java.math.BigDecimal
@@ -55,11 +66,16 @@ import java.time.format.DateTimeFormatter
  *   응답(9번째)까지 허용, D-5 승인 사안 A: 체크 기준 = 유저 답변 수 기준).
  * - 유저 음성: OCI 업로드 시도 → 실패 시(스텁/오프라인) 논리 경로만 유지하고 계속.
  *
- * v1.9 (D-5, 2026-09-06): 세션 2종 분기 (03a §2, P3-31) —
- * - createSession(userId, sessionType, thema?) — today(테마 랜덤) / theme(thema 고정).
- * - LEARNING_SESSION type+session_name 세팅, thema 유효성 E0400.
- * - 리포트 2단계 DTO 반영(generateProblems/generateTotal 동기 2호출 분해 —
- *   백그라운드 재편·중단/완료 판정은 커밋2). userAQ 캐시 조회는 커밋2 적용.
+ * v1.9 (D-5, 2026-09-06) 재편:
+ * - [1] 세션 2종 분기: createSession(userId, sessionType, thema?) — today(테마 랜덤) /
+ *   theme(thema 고정). LEARNING_SESSION type+session_name 세팅, thema 유효성 E0400.
+ * - [2] 리포트 2단계: 8번째 문제 채점 완료 시점에 /report/problems 자동 호출
+ *   (afterCommit 백그라운드 + REQUIRES_NEW) → AQ+4지표 피드백 UPDATE + REP_SCORES 갱신(지점 ②).
+ *   finish 시점에 학습 중단/완료 판정 → 중단(유저 talk 답변 1~3턴) = COMPLETED_NO_TALK +
+ *   total 미호출 / 완료(4턴 이상·하드캡) = COMPLETED + total 백그라운드 호출
+ *   (talkContext는 유저 4턴째 답변까지만). userMemory 갱신은 total 경로로 이관 완료(D-4 경계).
+ * - [3] userAQ = REP_SCORES.USER_AQ 캐시 조회(산정식 폐지 — v1.7 계약).
+ *   articulationRate·userRT = 최근 20개 창 내 최단 10 선정으로 수정(구 전체 이력 폐지).
  */
 @Service
 class SessionFlowService(
@@ -74,6 +90,7 @@ class SessionFlowService(
     private val userProfileRepository: UserProfileRepository,
     private val userRepresentativeScoreRepository: UserRepresentativeScoreRepository,
     private val userService: UserService,
+    private val sessionReportBackgroundWorker: SessionReportBackgroundWorker,
     private val objectStorageService: ObjectStorageService,
     @Value("\${demo.talk-turn-limit:8}") private val talkTurnLimit: Int,
     @Value("\${demo.themes:TEST}") private val demoThemes: String
@@ -311,6 +328,11 @@ class SessionFlowService(
         turn.score = BigDecimal(score)
         turn.status = "SCORED"
 
+        // [2.2] 8문제 채점 완료 감지 → /report/problems 자동 호출 (afterCommit 백그라운드)
+        // 문제풀이 5종(LISTEN_TEXT/LISTEN_PICTURE/NAMING/SHADOWING/SELF_TALK) TURN이 8행이고
+        // 전부 SCORED인 시점 — LISTEN 자체채점 직후도 포함.
+        maybeTriggerProblemsReport(sessionId)
+
         return ListenSubmitData(turnId = turnId, score = score, correct = score == 100)
     }
 
@@ -413,6 +435,9 @@ class SessionFlowService(
             articulationTime = eval.articulationTime
         )
         voiceRecordRepository.save(voiceRecord)
+
+        // [2.2] 8문제 채점 완료 감지 → /report/problems 자동 호출 (LISTEN 제출 경로와 동일)
+        maybeTriggerProblemsReport(sessionId)
 
         return VoiceSubmitData(
             turnId = turn.id!!,
@@ -566,8 +591,18 @@ class SessionFlowService(
     // ============================================================
 
     /**
-     * finish (커밋1 중간형): 리포트 2단계 DTO 반영 — 동기 2호출(problems+total) 분해.
-     * 백그라운드 재편·중단/완료 판정은 커밋2에서 적용 (03a §7 / 03 §9.3).
+     * finish (05a §3.5 갱신): 간이 보고서 데이터(AQ + 4지표 피드백 + 상태)를 동기 응답으로
+     * 돌려주고, 상세 보고서(/report/total)는 백그라운드 생성 — 응답 대기 없이 즉시 반환.
+     *
+     * 중단/완료 판정 (03 계약서 §9.3 — 승인 확정):
+     * - 이야기(STORYTELLING) 턴 유저 답변 수 = answer_text != null 행 수
+     * - 1~3턴 = 학습 중단 → STATUS=COMPLETED_NO_TALK + /report/total 미호출 +
+     *   talk/total 피드백 NULL 유지 (간이 보고서는 DB 저장 — 기록탭 미표시는 클라 규약)
+     * - 4턴 이상 = 학습 완료 → /report/total 백그라운드 호출 (talkContext는 유저
+     *   4턴째 답변까지만 — buildTalkContext가 "답변 완료 턴까지" 필터 = 기존 로직 자연 충족)
+     * - 8턴 하드캡 = COMPLETED (유저 8턴째 답변 후 AI 마무리 응답까지 생성됨)
+     *
+     * FinishData는 구조 유지하되 talk/total은 null 전송(하위호환) — 05a §3.5 명시.
      */
     @Transactional
     fun finishSession(sessionId: Long, userId: Long): FinishData {
@@ -578,68 +613,260 @@ class SessionFlowService(
                 if (it.status != "IN_PROGRESS") throw IllegalStateException("이미 종료된 세션입니다 (${it.status})")
             }
 
-        // (커밋1 중간형 — 동기 리포트 2호출 분해. 백그라운드/판정 재편은 커밋2)
-        val profile = userProfileRepository.findByUserId(userId)
-        val existingMemory = profile?.userMemory
+        // 중단/완료 판정: 이야기 턴 유저 답변 수 (answer_text != null)
+        val talkTurns = turnRepository.findBySessionIdOrderByTurnNumberAsc(sessionId)
+            .filter { it.contentType == "STORYTELLING" }
+        val userTalkAnswers = talkTurns.count { it.answerText != null }
 
-        // 간이 보고서 (§7.1 동기) — AQ + 4지표 피드백
-        val problems = aiContainerClient.generateProblems(
-            ProblemsReportRequest(
-                sessionId = sessionId,
-                userId = userId,
-                turns = buildTurnResults(sessionId)
-            )
-        )
-        session.aq = problems.sessionAQ
-        session.listenFeedback = problems.sessionFeedbacks.listenFeedback
-        session.namingFeedback = problems.sessionFeedbacks.namingFeedback
-        session.shadowingFeedback = problems.sessionFeedbacks.shadowingFeedback
-        session.selfTalkFeedback = problems.sessionFeedbacks.selfTalkFeedback
-
-        // 상세 보고서 (§7.2 동기) — talk/total + userMemory 갱신 규약 (§10, D-4 이관 전 유지)
-        val total = aiContainerClient.generateTotal(
-            TotalReportRequest(
-                sessionId = sessionId,
-                userId = userId,
-                userMemory = existingMemory,
-                turns = buildTurnResults(sessionId),
-                talkContext = buildTalkContext(sessionId)
-            )
-        )
-        total.sessionFeedbacks.talkFeedback?.let { session.talkFeedback = it }
-        total.sessionFeedbacks.totalFeedback?.let { session.totalFeedback = it }
-        val returnedMemory = total.userMemory
-        if (returnedMemory != null) {
-            val capped = if (returnedMemory.length > USER_MEMORY_HARD_CAP) returnedMemory.take(USER_MEMORY_HARD_CAP) else returnedMemory
-            if (profile != null) {
-                profile.userMemory = capped
-                userProfileRepository.save(profile)
-            } else {
-                logger.warn("[D-4] USER_PROFILE 행 부재로 userMemory 갱신 스킵: userId={}", userId)
-            }
-        } else {
-            logger.info("[D-4] userMemory 응답 null — 기존값 유지 (소실 방지): sessionId={}", sessionId)
-        }
-
-        session.status = "COMPLETED"
-
-        return FinishData(
-            sessionAQ = problems.sessionAQ,
+        // 간이 보고서 데이터 — 8문제 채점 완료 시점에 이미 적재된 세션 값 (미완료 세션이면 null)
+        val finishData = FinishData(
+            sessionAQ = session.aq ?: 0,
             feedbacks = FeedbacksDto(
                 listenFeedback = session.listenFeedback,
                 namingFeedback = session.namingFeedback,
                 shadowingFeedback = session.shadowingFeedback,
                 selfTalkFeedback = session.selfTalkFeedback,
-                talkFeedback = session.talkFeedback,
-                totalFeedback = session.totalFeedback
+                talkFeedback = null,     // 2단계 계약: 상세는 /report/total → §8.3에서 수령
+                totalFeedback = null
             )
         )
+
+        if (userTalkAnswers in 1..3) {
+            // 학습 중단 — total 미호출 (스텁 로그로 미호출 증명 = 이 로그만 남고 상세 생성 지연 로그가 없음)
+            session.status = "COMPLETED_NO_TALK"
+            logger.info(
+                "[D-5] 학습 중단 판정: sessionId={}, 유저 talk 답변 {}턴 → COMPLETED_NO_TALK, /report/total 미호출, talk/total 피드백 NULL 유지",
+                sessionId, userTalkAnswers
+            )
+        } else {
+            // 학습 완료 (유저 4턴 이상 마치기 / 8턴 하드캡 후 마무리) — total 백그라운드 호출
+            session.status = "COMPLETED"
+            logger.info(
+                "[D-5] 학습 완료 판정: sessionId={}, 유저 talk 답변 {}턴 → COMPLETED, /report/total 백그라운드 호출",
+                sessionId, userTalkAnswers
+            )
+            // 트랜잭션 커밋 후 백그라운드 실행 — 스텁 10초 지연이 메인 응답을 막지 않는다
+            val userIdVal = session.userId
+            TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
+                override fun afterCommit() {
+                    sessionReportBackgroundWorker.generateTotalReportInBackground(sessionId, userIdVal)
+                }
+            })
+        }
+
+        return finishData
     }
 
     // ============================================================
     // [2.2] /report/problems 자동 트리거 — 8번째 문제 채점 완료 감지
     // ============================================================
 
+    /**
+     * 문제풀이 5종(LISTEN_TEXT/LISTEN_PICTURE/NAMING/SHADOWING/SELF_TALK) TURN이
+     * 8행이고 전부 SCORED인 시점에 /report/problems를 백그라운드 호출.
+     * - 제출 트랜잭션 afterCommit에서 실행 — 메인 제출 응답은 스텁 지연(2~3초)과 무관하게 즉시 반환
+     * - 갱신 지점 ②: AQ+4지표 피드백 UPDATE + REP_SCORES 재계산 (ADR-009)
+     * - STATUS는 IN_PROGRESS 유지 (종료 판정은 finish)
+     */
+    private fun maybeTriggerProblemsReport(sessionId: Long) {
+        val scored = turnRepository.findBySessionIdOrderByTurnNumberAsc(sessionId)
+            .filter { it.contentType in PROBLEM_TYPES }
+        if (scored.size != 8 || scored.any { it.status != "SCORED" }) return
+
+        val session = sessionRepository.findById(sessionId).orElse(null) ?: return
+        val userId = session.userId
+        logger.info("[D-5] 8문제 채점 완료 감지: sessionId={} → /report/problems 백그라운드 호출", sessionId)
+        TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
+            override fun afterCommit() {
+                sessionReportBackgroundWorker.generateProblemsReportInBackground(sessionId, userId)
+            }
+        })
+    }
+
+    // ============================================================
+    // [4.1] GET /users/me/sessions/history — 기록 카드 (05a §8.2)
+    // ============================================================
+    @Transactional(readOnly = true)
+    fun getHistory(userId: Long): SessionHistoryResponse {
+        // 필터: STATUS != COMPLETED_NO_TALK AND AQ IS NOT NULL
+        // (AQ null = 간이 보고서 미생성 세션 — 카드에 AQ 표시 불가라 제외.
+        //  학습 중간에 나간 IN_PROGRESS 세션도 자연 배제됨. 05a §8.2 규약에 규약 추가 기재)
+        val rows = sessionRepository.findByUserIdOrderByCreatedAtDesc(userId)
+            .filter { it.status != "COMPLETED_NO_TALK" && it.aq != null }
+        return SessionHistoryResponse(
+            sessions = rows.map { s ->
+                SessionHistoryItem(
+                    sessionId = s.id!!,
+                    sessionName = s.sessionName,
+                    createdAt = s.createdAt?.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME),
+                    aq = s.aq
+                )
+            }
+        )
+    }
+
+    // ============================================================
+    // [4.2] GET /sessions/{id}/report — 세부 보고서 (05a §8.3)
+    // ============================================================
+
+    /**
+     * 세부 보고서 — radar(세션 TURN 집계) + metricCards(4지표 카드) + talkHistory.
+     * - 학습 중단 세션(COMPLETED_NO_TALK) → E0404 (리스트에도 없으니 직접 호출도 차단)
+     * - userId 소유 검증 필수 (permitAll 경로 — 타 유저 세션 조회 방어)
+     * - 응답 수신 시 REPORT_VIEWED_AT null이면 기록 (구현 단순성 기준: null일 때만 기록)
+     */
+    @Transactional
+    fun getSessionReport(sessionId: Long, userId: Long): SessionReportData {
+        val session = sessionRepository.findById(sessionId)
+            .orElseThrow { IllegalArgumentException("존재하지 않는 세션입니다: $sessionId") }
+        if (session.userId != userId) {
+            throw IllegalArgumentException("세션 소유 사용자만 조회할 수 있습니다 (sessionId=$sessionId)")
+        }
+        if (session.status == "COMPLETED_NO_TALK") {
+            throw NoSuchElementException("학습 중단 세션은 세부 보고서가 없습니다 (sessionId=$sessionId)")
+        }
+
+        val turns = turnRepository.findBySessionIdOrderByTurnNumberAsc(sessionId)
+        val problemTurns = turns.filter { it.contentType != "STORYTELLING" }
+
+        // radar: content_type별 평균 — LISTEN_TEXT+LISTEN_PICTURE 통합=LISTEN (4축).
+        // score NULL 턴 제외, 해당 타입에 SCORED 턴이 없으면 null.
+        val radar = RadarDto(
+            listen = avgScoreOf(turns, listOf("LISTEN_TEXT", "LISTEN_PICTURE")),
+            naming = avgScoreOf(turns, listOf("NAMING")),
+            shadowing = avgScoreOf(turns, listOf("SHADOWING")),
+            selfTalk = avgScoreOf(turns, listOf("SELF_TALK"))
+        )
+
+        // metricCards: 4지표 카드 — feedback=LEARNING_SESSION.*_feedback(간이 보고서 적재분)
+        val metricCards = listOf(
+            metricCard("LISTEN", session.listenFeedback, turns, listOf("LISTEN_TEXT", "LISTEN_PICTURE")),
+            metricCard("NAMING", session.namingFeedback, turns, listOf("NAMING")),
+            metricCard("SHADOWING", session.shadowingFeedback, turns, listOf("SHADOWING")),
+            metricCard("SELF_TALK", session.selfTalkFeedback, turns, listOf("SELF_TALK"))
+        )
+
+        // talkHistory: STORYTELLING 턴 — speaker=AI|USER, VOICE_RECORD 매핑
+        val talkTurnRows = turns.filter { it.contentType == "STORYTELLING" }
+        val talkHistory = talkTurnRows.flatMap { t ->
+            val aiVoice = voiceRecordRepository.findByTurnId(t.id!!).firstOrNull { it.speaker == "AI" }
+            buildList {
+                if (t.promptText != null) {
+                    add(
+                        TalkHistoryItem(
+                            speaker = "AI",
+                            text = t.promptText!!,
+                            ttsUrl = aiVoice?.let { "/api/v1/voice/${it.id}" }
+                        )
+                    )
+                }
+                if (t.answerText != null) {
+                    val userVoice = voiceRecordRepository.findByTurnId(t.id!!).firstOrNull { it.speaker == "USER" }
+                    add(
+                        TalkHistoryItem(
+                            speaker = "USER",
+                            text = t.answerText!!,
+                            voiceUrl = userVoice?.let { "/api/v1/voice/${it.id}" }
+                        )
+                    )
+                }
+            }
+        }
+
+        // REPORT_VIEWED_AT — null일 때만 기록 (구현 단순성 우선 — 05a §8.3 규약)
+        var recordedViewedAt: LocalDateTime? = null
+        if (session.reportViewedAt == null) {
+            val now = LocalDateTime.now()
+            session.reportViewedAt = now
+            recordedViewedAt = now
+            logger.info("[D-5] REPORT_VIEWED_AT 최초 기록: sessionId={}, at={}", sessionId, now)
+        }
+
+        return SessionReportData(
+            sessionId = sessionId,
+            aq = session.aq,
+            totalFeedback = session.totalFeedback,
+            radar = radar,
+            metricCards = metricCards,
+            talkFeedback = session.talkFeedback,
+            talkHistory = talkHistory,
+            reportViewedAt = recordedViewedAt?.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+                ?: session.reportViewedAt?.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+        )
+    }
+
+    private fun metricCard(
+        type: String,
+        feedback: String?,
+        turns: List<Turn>,
+        contentTypes: List<String>
+    ): MetricCardDto {
+        val typeTurns = turns.filter { it.contentType in contentTypes }
+        val score = avgScoreOf(turns, contentTypes)
+        return MetricCardDto(
+            type = type,
+            score = score,
+            feedback = feedback,
+            turns = typeTurns.map { t ->
+                MetricTurnDto(
+                    turnId = t.id!!,
+                    turnNumber = t.turnNumber,
+                    promptText = t.promptText,
+                    ttsUrl = voiceRecordRepository.findByTurnId(t.id!!).firstOrNull { it.speaker == "AI" }
+                        ?.let { "/api/v1/voice/${it.id}" },
+                    imageUrl = t.turnImageId()?.let { "/api/v1/content/images/$it/file" },
+                    answer = buildAnswer(t)
+                )
+            }
+        )
+    }
+
+    /**
+     * 턴별 답변 조립 (05a §8.3):
+     * - LISTEN={mediaType:"text", value: 선택했던 선택지 텍스트, correct: selected==correct} —
+     *   selected_value는 1-based order(정수 문자열) → choices_json 역직렬화로 텍스트 추출
+     *   (deserializeChoices 선례 재사용).
+     * - LISTEN_PICTURE: 선택지 context가 image_id → value는 선택지 context 전달,
+     *   mediaType은 선택지 따름("image"). 클라가 이미지 로드 가능 (승인 사안 C).
+     * - 음성형={mediaType:"voice", value: answer_text(STT), voiceUrl}
+     */
+    private fun buildAnswer(t: Turn): AnswerDto? {
+        return when (t.contentType) {
+            "LISTEN_TEXT", "LISTEN_PICTURE" -> {
+                val selected = t.selectedValue ?: return AnswerDto(mediaType = "text", value = null, correct = null)
+                val choices = deserializeChoices(t.choicesJson)
+                val selectedChoice = choices?.firstOrNull { it.order.toString() == selected }
+                val correct = t.correctValue != null && selected == t.correctValue
+                AnswerDto(
+                    mediaType = selectedChoice?.mediaType?.lowercase() ?: "text",
+                    value = selectedChoice?.context,   // LISTEN_TEXT=선택했던 텍스트 / LISTEN_PICTURE=image_id
+                    correct = correct
+                )
+            }
+            else -> {
+                val voice = voiceRecordRepository.findByTurnId(t.id!!).firstOrNull { it.speaker == "USER" }
+                AnswerDto(
+                    mediaType = "voice",
+                    value = t.answerText,
+                    correct = null,
+                    voiceUrl = voiceRecordRepository.findByTurnId(t.id!!).firstOrNull { it.speaker == "USER" }
+                        ?.let { "/api/v1/voice/${it.id}" }
+                )
+            }
+        }
+    }
+
+    private fun Turn.turnImageId(): Long? =
+        turnImageRepository.findByTurnIdOrderByImageOrderAsc(this.id!!).firstOrNull()?.imageId
+
+    /** content_type별 TURN.score 평균 — score NULL 턴 제외, 대상 없으면 null */
+    private fun avgScoreOf(turns: List<Turn>, contentTypes: List<String>): BigDecimal? =
+        turns.filter { it.contentType in contentTypes && it.score != null }
+            .map { it.score!! }
+            .takeIf { it.isNotEmpty() }
+            ?.let { list ->
+                list.reduce { acc, d -> d + acc }.divide(BigDecimal(list.size), 2, RoundingMode.HALF_UP)
+            }
 
     // ============================================================
     // helpers
@@ -769,6 +996,8 @@ class SessionFlowService(
         val records = voiceRecordRepository.findByUserId(userId)
             .filter { it.speaker == "USER" && it.turnId in voicedTypeTurnIds }
             .filter { (it.syllables ?: 0) > 0 && it.articulationTime != null && it.articulationTime!!.signum() > 0 }
+            .sortedByDescending { it.createdAt }      // 최근 20개 창 — createdAt 내림차순
+            .take(20)
         if (records.isEmpty()) return null
         val top10 = records
             .sortedBy { it.articulationTime!!.divide(BigDecimal(it.syllables!!), 6, RoundingMode.HALF_UP) }
@@ -790,6 +1019,8 @@ class SessionFlowService(
         val records = voiceRecordRepository.findByUserId(userId)
             .filter { it.speaker == "USER" && it.turnId in namingTurnIds }
             .filter { (it.syllables ?: 0) > 0 && it.speakingTime != null }
+            .sortedByDescending { it.createdAt }      // 최근 20개 창 — createdAt 내림차순
+            .take(20)
         if (records.isEmpty()) return null
         val top10 = records
             .sortedBy { it.speakingTime!!.divide(BigDecimal(it.syllables!!), 6, RoundingMode.HALF_UP) }
