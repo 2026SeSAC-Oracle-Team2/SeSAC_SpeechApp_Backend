@@ -6,6 +6,7 @@ import com.sesac.speechapp.dto.session.HintData
 import com.sesac.speechapp.dto.session.ListenSubmitData
 import com.sesac.speechapp.dto.session.ListenSubmitRequest
 import com.sesac.speechapp.dto.session.SessionCreateData
+import com.sesac.speechapp.dto.session.SessionReportData
 import com.sesac.speechapp.dto.session.TalkData
 import com.sesac.speechapp.dto.session.VoiceSubmitData
 import com.sesac.speechapp.service.SessionFlowService
@@ -142,4 +143,13 @@ class SessionFlowController(
         return ResponseEntity.ok(ApiResponse.success(data))
     }
 
+    /** 8.3 세부 보고서 조회 — userId 쿼리파라미터 소유 검증 (permitAll 경로 방어, 05a §8.3) */
+    @GetMapping("/{sessionId}/report")
+    fun getSessionReport(
+        @PathVariable sessionId: Long,
+        @RequestParam("userId") userId: Long
+    ): ResponseEntity<ApiResponse<SessionReportData>> {
+        val data = sessionFlowService.getSessionReport(sessionId, userId)
+        return ResponseEntity.ok(ApiResponse.success(data))
+    }
 }

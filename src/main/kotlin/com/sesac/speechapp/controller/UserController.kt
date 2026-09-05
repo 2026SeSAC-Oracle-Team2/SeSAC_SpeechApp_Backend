@@ -7,6 +7,7 @@ import com.sesac.speechapp.dto.TagsResponse
 import com.sesac.speechapp.dto.SurveyRequest
 import com.sesac.speechapp.dto.SurveyResponse
 import com.sesac.speechapp.dto.ScoresResponse
+import com.sesac.speechapp.dto.session.SessionHistoryResponse
 import com.sesac.speechapp.service.ObjectStorageService
 import com.sesac.speechapp.service.UserService
 import org.slf4j.LoggerFactory
@@ -76,6 +77,19 @@ class UserController(
         @AuthenticationPrincipal userUuid: String
     ): ResponseEntity<ApiResponse<ScoresResponse>> {
         val result = userService.getScores(userUuid)
+        return ResponseEntity.ok(ApiResponse.success(result))
+    }
+
+    /**
+     * 학습 기록 카드 리스트 (D-5 [4.1] — 05a §8.2): STATUS != COMPLETED_NO_TALK +
+     * AQ NOT NULL 필터. JWT 필수 — @AuthenticationPrincipal userUuid 기반 소유 스코프.
+     * 응답: [{sessionId, sessionName, createdAt(ISO), aq}] — 상한 없음(페이징 미도입).
+     */
+    @GetMapping("/me/sessions/history")
+    fun getSessionHistory(
+        @AuthenticationPrincipal userUuid: String
+    ): ResponseEntity<ApiResponse<SessionHistoryResponse>> {
+        val result = userService.getSessionHistory(userUuid)
         return ResponseEntity.ok(ApiResponse.success(result))
     }
 

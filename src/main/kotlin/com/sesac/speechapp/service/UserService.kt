@@ -1,6 +1,8 @@
 package com.sesac.speechapp.service
 
 import com.sesac.speechapp.dto.ScoresResponse
+import com.sesac.speechapp.dto.session.SessionHistoryItem
+import com.sesac.speechapp.dto.session.SessionHistoryResponse
 import com.sesac.speechapp.dto.SurveyRequest
 import com.sesac.speechapp.dto.SurveyResponse
 import com.sesac.speechapp.dto.TagsResponse
@@ -196,6 +198,35 @@ class UserService(
             naming = rep?.userScoreNaming,
             shadowing = rep?.userScoreShadowing,
             selfTalk = rep?.userScoreSelfTalk
+        )
+    }
+
+    /**
+     * 학습 기록 카드 리스트 (D-5 [4.1] — 05a §8.2).
+     * LEARNING_SESSION 조회(user_id, CREATED_AT DESC) → 필터:
+     * STATUS != COMPLETED_NO_TALK **AND AQ IS NOT NULL**
+     * (AQ null = 간이 보고서 미생성 세션 — 카드에 AQ 표시 불가라 제외.
+     *  학습 중간에 나간 IN_PROGRESS 세션도 자연 배제됨. 05a §8.2 규약에 규약 추가 반영).
+     * createdAt은 ISO 타임스탬프 — 표현(포맷)은 클라 책임.
+     */
+    @Transactional(readOnly = true)
+    fun getSessionHistory(userUuid: String): SessionHistoryResponse {
+        val user = appUserRepository.findByUuid(userUuid)
+            ?: throw IllegalArgumentException("사용자를 찾을 수 없습니다: $userUuid")
+        val userId = requireNotNull(user.id) { "사용자 ID 누락: $userUuid" }
+
+        val rows = sessionRepository.findByUserIdOrderByCreatedAtDesc(userId)
+            .filter { it.status != "COMPLETED_NO_TALK" && it.aq != null }
+
+        return SessionHistoryResponse(
+            sessions = rows.map { s ->
+                SessionHistoryItem(
+                    sessionId = requireNotNull(s.id),
+                    sessionName = s.sessionName,
+                    createdAt = s.createdAt?.format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME),
+                    aq = s.aq
+                )
+            }
         )
     }
 
