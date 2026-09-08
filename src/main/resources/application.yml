@@ -116,9 +116,11 @@ ai:
     # mode: stub
     mode: real
     base-url: ${AI_CONTAINER_BASE_URL:http://localhost:8000}
+    # BE↔컨테이너 공유폴더 (음성 교환 루트 — 03a §0): TTS 스트리밍·유저음성 사본 공유
+    shared-audio-root: /home/opc/containers/llm
 
 # 데모 세션 플로우 설정
 demo:
-  themes: TEST
+  themes: HOSPITAL,CAFE
   # D-5 [2.3]: 8턴 하드캡 (기획 확정 — 유저 8턴 답변 후 AI 마무리 응답까지. 구 데모 3턴 폐지)
   talk-turn-limit: 8
