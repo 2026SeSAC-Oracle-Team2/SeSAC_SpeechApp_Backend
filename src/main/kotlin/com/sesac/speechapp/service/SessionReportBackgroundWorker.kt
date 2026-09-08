@@ -84,6 +84,59 @@ class SessionReportBackgroundWorker(
         }
     }
 
+    /**
+     * [e2e3-A] 음성 문제 채점 백그라운드 워커 — 컨테이너 호출+SCORED 적재+8턴 감지 재시도.
+     *
+     * 제출(동기)은 saveUserVoice+SUBMITTED 전환까지만 하고 즉시 반환 (사용자 계약:
+     * "녹음 업로드 확인까지만 되면 클라이언트가 다음으로 진행"). 실제 채점(STT+LLM,
+     * 실측 naming 12.6s)은 여기서 실행.
+     * - 채점 적재는 applier.applyVoiceScored(REQUIRES_NEW)로 위임 — 트랜잭션 경계 분리
+     *   (리포트 워커·applier와 동일 구조. 백그라운드 스레드엔 메인 트랜잭션 없음).
+     * - 적재 후 8턴 감지 재판정: 트리거 조건을 "8행 전부 SCORED"에서 "8행 전부
+     *   SUBMITTED 이상"으로 완화(지시서 [A] 설계) — 각 채점 완료 시점에 재판정되므로
+     *   채점이 늦어도 마지막 SCORED 적재 시점에 트리거된다.
+     * - 멱등 가드: LEARNING_SESSION.AQ IS NOT NULL이면 이미 적재 완료 — 재호출 금지.
+     * - 실패 정책: 리포트 워커와 동일 — 로그만 남기고 삼킨다 (제출 응답은 이미 반환됨).
+     */
+    @Async("sessionReportExecutor")
+    open fun scoreVoiceInBackground(
+        sessionId: Long,
+        turnId: Long,
+        userId: Long,
+        contentType: String,
+        objectKey: String
+    ) {
+        try {
+            // REQUIRES_NEW 적재 — 반환 시점에 커밋 완료 (백그라운드 스레드라 afterCommit
+            // 등록 대신 반환 후 직접 후속 단계를 실행한다).
+            applier.applyVoiceScored(sessionId, turnId, userId, contentType, objectKey)
+            // [e2e3-A] 채점 완료 콜백에서 8턴 감지 재판정 (멱등 — aq IS NOT NULL 가드).
+            maybeTriggerProblemsReport(sessionId)
+        } catch (e: Exception) {
+            logger.error(
+                "[e2e3-A] 음성 채점 백그라운드 실패 (로그만 남기고 계속): sessionId={}, turnId={}",
+                sessionId, turnId, e
+            )
+        }
+    }
+
+    /**
+     * [e2e3-A] 8문제 완료 감지 재판정 — SessionScoringService.maybeTriggerProblemsReport의
+     * 완화 버전(전부 SUBMITTED 이상 + aq IS NOT NULL 멱등 가드). 비동기 스레드에서 직접
+     * 호출하므로 afterCommit 등록 없이 즉시 워커 호출 (applier의 REQUIRES_NEW는 이미 커밋됨).
+     */
+    private fun maybeTriggerProblemsReport(sessionId: Long) {
+        val scored = turnRepository.findBySessionIdOrderByTurnNumberAsc(sessionId)
+            .filter { it.contentType in com.sesac.speechapp.service.SessionFlowService.PROBLEM_TYPES }
+        if (scored.size != 8 || scored.any { it.status == "PENDING" }) return
+
+        val session = sessionRepository.findById(sessionId).orElse(null) ?: return
+        if (session.aq != null) return  // 멱등 가드 — 간이보고서 이미 적재됨 (재호출 금지)
+        val userId = session.userId
+        logger.info("[e2e3-A] 8문제 채점 완료 감지(비동기 재판정): sessionId={} → /report/problems 백그라운드 호출", sessionId)
+        generateProblemsReportInBackground(sessionId, userId)
+    }
+
     /** 문제풀이 8턴 결과 (SessionFlowService.buildTurnResults와 동일 로직 — 비동기 컨텍스트 재구성) */
     private fun buildProblemTurnResults(sessionId: Long): List<com.sesac.speechapp.dto.aicontainer.TurnResult> =
         turnRepository.findBySessionIdOrderByTurnNumberAsc(sessionId)

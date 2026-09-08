@@ -94,18 +94,10 @@ class SessionScoringService(
         val objectKey = objectStorageService.buildVoiceKey(user.uuid, sessionId, turnId, "USER")
         saveUserVoice(objectKey, file)
 
-        val response = aiContainerClient.scoreNaming(
-            com.sesac.speechapp.dto.aicontainer.NamingScoreRequest(
-                sessionId = sessionId,
-                userId = userId,
-                problemContext = turn.correctValue ?: "",
-                userVoicePath = objectKey,
-                hintCount = turn.hintsShown ?: 0,
-                // v1.4: 0개(첫사용)면 0 전송 — 구 null 폐지. 최근 20개 창 적용 (D-5 [3.2])
-                userRT = scoreCalculationService.calculateUserRT(userId) ?: java.math.BigDecimal.ZERO
-            )
-        )
-        return applyScoredResult(turn, sessionId, userId, objectKey, response.scoreNaming, response.userVoiceEval)
+        // [e2e3-A] 채점 비동기화 — 제출 응답 = 업로드 확인(OCI+공유폴더) 즉시.
+        // TURN을 SUBMITTED로 전환하고 VOICE_RECORD USER 행(지표 미측정)만 적재한 뒤
+        // 즉시 반환 — 컨테이너 채점(STT+LLM)은 백그라운드 워커로 이관.
+        return submitVoiceAsync(turn, sessionId, userId, objectKey, "NAMING")
     }
 
     @Transactional
@@ -117,17 +109,8 @@ class SessionScoringService(
         val objectKey = objectStorageService.buildVoiceKey(user.uuid, sessionId, turnId, "USER")
         saveUserVoice(objectKey, file)
 
-        val response = aiContainerClient.scoreShadowing(
-            com.sesac.speechapp.dto.aicontainer.ShadowingScoreRequest(
-                sessionId = sessionId,
-                userId = userId,
-                problemContext = turn.correctValue ?: turn.promptText ?: "",
-                userVoicePath = objectKey,
-                // v1.4: 조음속도 — 0개(첫사용)면 0 전송. 최근 20개 창 적용 (D-5 [3.2])
-                articulationRate = scoreCalculationService.calculateArticulationRate(userId) ?: java.math.BigDecimal.ZERO
-            )
-        )
-        return applyScoredResult(turn, sessionId, userId, objectKey, response.scoreShadowing, response.userVoiceEval)
+        // [e2e3-A] 채점 비동기화 — naming과 동일 (지시서 [A] 설계)
+        return submitVoiceAsync(turn, sessionId, userId, objectKey, "SHADOWING")
     }
 
     @Transactional
@@ -144,16 +127,77 @@ class SessionScoringService(
         val imageName = imageId?.let { imageResourceRepository.findById(it).orElse(null)?.imageName } ?: ""
         val problemTag = """{"tags": ["사람", "상황", "행동", "$imageName"]}"""
 
-        val response = aiContainerClient.scoreSelfTalk(
-            com.sesac.speechapp.dto.aicontainer.SelfTalkScoreRequest(
-                sessionId = sessionId,
-                userId = userId,
-                problemImage = imageName,
-                problemTag = problemTag,
-                userVoicePath = objectKey
+        // [e2e3-A] 채점 비동기화 — problemTag 조립(더미/TAG_PATH 원본, I 단위)까지 동기로
+        // 확정해 두고 컨테이너 호출만 백그라운드로 이관.
+        return submitVoiceAsync(turn, sessionId, userId, objectKey, "SELF_TALK")
+    }
+
+    /**
+     * [e2e3-A] 음성 문제 제출 — 업로드 확인 즉시 응답(계약: 05a §3.2 DTO 불변).
+     *
+     * 동기 구간(이 메서드):
+     *   a. saveUserVoice — 이미 호출부에서 완료(OCI+공유폴더 실패 시 throw → 즉시 실패)
+     *   b. TURN 상태 PENDING→SUBMITTED 즉시 전환·저장 (기존 상태집합 — CHECK 제약 실측)
+     *   c. VOICE_RECORD USER 행 즉시 적재 (지표 3종 null — 채점 완료 시 applier가 UPDATE)
+     *   d. VoiceSubmitData 즉시 반환: score=0·eval 전부 0/빈텍스트 (스키마 유지·DTO 추가 금지)
+     *   e. afterCommit에서 scoreVoiceInBackground 호출 — 컨테이너 채점 백그라운드
+     *
+     * 8턴 감지: 각 채점 완료 콜백(applier.applyVoiceScored)에서 재판정 — 제출 시점엔
+     * 아직 SCORED가 아니므로 여기서 maybeTriggerProblemsReport를 호출하지 않는다.
+     * LISTEN(submitListen)은 자체채점 즉시 SCORED라 기존 동기 트리거 유지.
+     */
+    private fun submitVoiceAsync(
+        turn: Turn,
+        sessionId: Long,
+        userId: Long,
+        objectKey: String,
+        contentType: String
+    ): VoiceSubmitData {
+        // b. TURN PENDING→SUBMITTED 즉시 (채점 대기 상태 — 새 중간상태 아님)
+        turn.status = "SUBMITTED"
+        turnRepository.save(turn)
+
+        // c. VOICE_RECORD USER 행 — 지표 3종 null로 즉시 적재 (채점 완료 시 UPDATE)
+        val turnIdVal = turn.id!!
+        val voiceRecord = VoiceRecord(
+            userId = userId,
+            sessionId = sessionId,
+            turnId = turnIdVal,
+            speaker = "USER",
+            voiceFilePath = objectKey,
+            durationSeconds = null,
+            syllables = null,
+            speakingTime = null,
+            articulationTime = null
+        )
+        voiceRecordRepository.save(voiceRecord)
+
+        // e. afterCommit → 백그라운드 채점 (메인 트랜잭션 커밋 보장 — 데이터 일관성)
+        TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
+            override fun afterCommit() {
+                sessionReportBackgroundWorker.scoreVoiceInBackground(
+                    sessionId, turnIdVal, userId, contentType, objectKey
+                )
+            }
+        })
+        logger.info(
+            "[e2e3-A] 음성 제출 즉시 응답: sessionId={}, turnId={}, type={}, objectKey={} — 채점 백그라운드 이관",
+            sessionId, turnIdVal, contentType, objectKey
+        )
+
+        // d. 응답 DTO 즉시 반환 — score=0·eval 전부 0/빈텍스트 (DTO 불변 — 클라 수정 최소화)
+        return VoiceSubmitData(
+            turnId = turnIdVal,
+            score = java.math.BigDecimal.ZERO,
+            voiceRecordId = voiceRecord.id!!,
+            userVoiceEval = UserVoiceEvalDto(
+                durationSecond = 0,
+                syllables = 0,
+                speakingTime = java.math.BigDecimal.ZERO,
+                articulationTime = java.math.BigDecimal.ZERO,
+                text = ""
             )
         )
-        return applyScoredResult(turn, sessionId, userId, objectKey, response.scoreSelfTalk, response.userVoiceEval)
     }
 
     /** 공통 적재: TURN.score/answer_text + VOICE_RECORD USER 행 + 8문제 완료 감지 */
@@ -417,9 +461,16 @@ class SessionScoringService(
     private fun maybeTriggerProblemsReport(sessionId: Long) {
         val scored = turnRepository.findBySessionIdOrderByTurnNumberAsc(sessionId)
             .filter { it.contentType in SessionFlowService.PROBLEM_TYPES }
-        if (scored.size != 8 || scored.any { it.status != "SCORED" }) return
+        // [e2e3-A] 완화: 비동기 채점 도입으로 8행 SCORED를 기다리면 마지막 채점 전까지
+        // 트리거가 안 걸린다 — "8행 전부 SUBMITTED 이상"으로 완화(지시서 [A] 설계).
+        // 마지막 채점 완료 시점의 재판정 호출(applier.applyVoiceScored)에서 SCORED 8행이
+        // 확정된 턴 결과로 /report/problems가 호출된다.
+        if (scored.size != 8 || scored.any { it.status == "PENDING" }) return
 
         val session = sessionRepository.findById(sessionId).orElse(null) ?: return
+        // [e2e3-A] 멱등 가드: AQ 적재(간이보고서)가 이미 끝난 세션이면 재호출 금지.
+        // 지시서 [A] "이미 호출됐으면 재호출 금지, session.aq IS NOT NULL 가드 사용".
+        if (session.aq != null) return
         val userId = session.userId
         logger.info("[D-5] 8문제 채점 완료 감지: sessionId={} → /report/problems 백그라운드 호출", sessionId)
         TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {

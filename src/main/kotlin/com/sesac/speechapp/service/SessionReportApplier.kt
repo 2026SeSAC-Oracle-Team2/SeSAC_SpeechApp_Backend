@@ -27,7 +27,13 @@ class SessionReportApplier(
     private val sessionRepository: SessionRepository,
     private val turnRepository: TurnRepository,
     private val userProfileRepository: UserProfileRepository,
-    private val userRepresentativeScoreRepository: UserRepresentativeScoreRepository
+    private val userRepresentativeScoreRepository: UserRepresentativeScoreRepository,
+    // [e2e3-A] 음성 채점 백그라운드 적재용 — 컨테이너 클라이언트·지표 산정·이미지 리포
+    private val container: com.sesac.speechapp.ai.AiContainerClient,
+    private val scoreCalc: com.sesac.speechapp.service.ScoreCalculationService,
+    private val turnImageRepository: com.sesac.speechapp.repository.TurnImageRepository,
+    private val imageResourceRepository: com.sesac.speechapp.repository.ImageResourceRepository,
+    private val voiceRecordRepository: com.sesac.speechapp.repository.VoiceRecordRepository
 ) {
     private val logger = LoggerFactory.getLogger(SessionReportApplier::class.java)
 
@@ -58,6 +64,116 @@ class SessionReportApplier(
             sessionId, response.sessionAQ
         )
     }
+
+    /**
+     * [e2e3-A] 음성 문제 채점 적재 — 백그라운드 워커에서 실행(REQUIRES_NEW).
+     *
+     * 컨테이너 scoreXxx 호출(STT+LLM, 실측 10~12s) → 기존 applyScoredResult와 동일 적재:
+     *   - TURN: answer_text(STT)·score·PENDING→SCORED (제출 시 SUBMITTED에서 갱신)
+     *   - VOICE_RECORD USER 행: 제출 시 null로 만들어 둔 지표 3종(voice_file_path 키 행) UPDATE
+     *   - LISTEN은 이 경로를 타지 않는다(BE 자체채점 SCORED 즉시).
+     * 적재 후 maybeTriggerProblemsReport 재판정(완화 조건+멱등 가드) — 마지막 채점
+     * 완료 시점에 8턴 감지 → /report/problems 트리거.
+     *
+     * 이 메서드는 SessionScoringService.applyScoredResult(동기 시절)의 채점 구간을
+     * 컨테이너 호출부와 함께 이전한 것 — 컨테이너 요청 조립(userRT/articulationRate/
+     * problemTag)은 제출 시점 값이 필요해 제출 경로에서 확정해 worker로 전달한다.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    fun applyVoiceScored(
+        sessionId: Long,
+        turnId: Long,
+        userId: Long,
+        contentType: String,
+        objectKey: String
+    ) {
+        val turn = turnRepository.findById(turnId)
+            .orElseThrow { IllegalArgumentException("존재하지 않는 턴입니다: $turnId") }
+            .also { if (it.sessionId != sessionId) throw IllegalArgumentException("세션 불일치 (turn=$turnId)") }
+
+        // when 분기별 응답 타입이 달라(Naming/Shadowing/SelfTalk 전용 DTO) eval·score를
+        // 분기 안에서 Pair로 확정한다 — 공통 적재 구간은 그 아래에서 진행.
+        val (eval, score) = when (contentType) {
+            "NAMING" -> {
+                val response = container.scoreNaming(
+                    com.sesac.speechapp.dto.aicontainer.NamingScoreRequest(
+                        sessionId = sessionId,
+                        userId = userId,
+                        problemContext = turn.correctValue ?: "",
+                        userVoicePath = objectKey,
+                        hintCount = turn.hintsShown ?: 0,
+                        userRT = scoreCalc.calculateUserRT(userId) ?: java.math.BigDecimal.ZERO
+                    )
+                )
+                response.userVoiceEval to response.scoreNaming
+            }
+            "SHADOWING" -> {
+                val response = container.scoreShadowing(
+                    com.sesac.speechapp.dto.aicontainer.ShadowingScoreRequest(
+                        sessionId = sessionId,
+                        userId = userId,
+                        problemContext = turn.correctValue ?: turn.promptText ?: "",
+                        userVoicePath = objectKey,
+                        articulationRate = scoreCalc.calculateArticulationRate(userId) ?: java.math.BigDecimal.ZERO
+                    )
+                )
+                response.userVoiceEval to response.scoreShadowing
+            }
+            "SELF_TALK" -> {
+                val imageId = turnImageRepository.findByTurnIdOrderByImageOrderAsc(turnId)
+                    .firstOrNull()?.imageId
+                val imageName = imageId?.let { imageResourceRepository.findById(it).orElse(null)?.imageName } ?: ""
+                val problemTag = buildSelfTalkProblemTag(turn, imageId, imageName)
+                val response = container.scoreSelfTalk(
+                    com.sesac.speechapp.dto.aicontainer.SelfTalkScoreRequest(
+                        sessionId = sessionId,
+                        userId = userId,
+                        problemImage = imageName,
+                        problemTag = problemTag,
+                        userVoicePath = objectKey
+                    )
+                )
+                response.userVoiceEval to response.scoreSelfTalk
+            }
+            else -> throw IllegalArgumentException("채점 불가 유형: $contentType")
+        }
+
+        // TURN SCORED 적재 (기존 applyScoredResult와 동일 — dirty checking)
+        turn.answerText = eval.text
+        turn.score = score
+        turn.status = "SCORED"
+
+        // VOICE_RECORD USER 행 UPDATE — 제출 시 null로 만든 지표 3종.
+        // ⚠️ delete+save 금지: 제출 응답의 voiceRecordId(05a §3.2 계약)가 그대로 살아야
+        // 한다(음성 파일 참조키). entity 필드가 val이라 JPQL 벌크 UPDATE로 처리.
+        val updatedCount = voiceRecordRepository.updateUserVoiceMetrics(
+            turnId = turnId,
+            durationSeconds = eval.durationSecond,
+            syllables = eval.syllables,
+            speakingTime = eval.speakingTime,
+            articulationTime = eval.articulationTime
+        )
+        if (updatedCount == 0) {
+            logger.warn("[e2e3-A] VOICE_RECORD USER 행 미발견 — 지표 미적재: turnId={}", turnId)
+        }
+
+        logger.info(
+            "[e2e3-A] 음성 채점 백그라운드 완료: sessionId={}, turnId={}, type={}, score={}",
+            sessionId, turnId, contentType, score
+        )
+        // 8턴 감지 재판정은 워커(scoreVoiceInBackground)가 applier 반환 후 직접 실행 —
+        // 이 클래스는 워커를 참조하지 않는다(순환 의존 방지).
+    }
+
+    /**
+     * [e2e3-A·I 예정] problemTag 조립 — 지시서 [I]에서 TAG_PATH 원본 JSON 연동 예정.
+     * 현재는 기존 더미 규약 유지(수정 없음 — [I] 단위에서 교체).
+     */
+    private fun buildSelfTalkProblemTag(
+        turn: com.sesac.speechapp.entity.Turn,
+        imageId: Long?,
+        imageName: String
+    ): String = """{"tags": ["사람", "상황", "행동", "$imageName"]}"""
 
     /**
      * 상세 보고서(/report/total) 응답 적용:
