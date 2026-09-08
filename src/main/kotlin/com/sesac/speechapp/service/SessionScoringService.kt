@@ -53,7 +53,8 @@ class SessionScoringService(
     private val userService: UserService,
     private val sessionReportBackgroundWorker: SessionReportBackgroundWorker,
     private val objectStorageService: ObjectStorageService,
-    @Value("\${demo.talk-turn-limit:8}") private val talkTurnLimit: Int
+    @Value("\${demo.talk-turn-limit:8}") private val talkTurnLimit: Int,
+    @Value("\${ai.container.shared-audio-root:/home/opc/containers/llm}") private val sharedAudioRoot: String
 ) {
     private val logger = LoggerFactory.getLogger(SessionScoringService::class.java)
 
@@ -438,12 +439,24 @@ class SessionScoringService(
             .also { if (it.sessionId != sessionId) throw IllegalArgumentException("세션 불일치 (turn=$turnId, session=$sessionId)") }
 
     private fun saveUserVoice(objectKey: String, file: MultipartFile) {
+        val bytes = file.bytes
         try {
-            objectStorageService.uploadObject(objectKey, file.bytes, "audio/mp4")
+            objectStorageService.uploadObject(objectKey, bytes, "audio/mp4")
         } catch (e: Exception) {
             // 스텁/오프라인 모드: OCI 실패해도 논리 경로 유지하고 진행 (데모 범위)
             logger.warn("OCI 음성 업로드 실패 — 논리 경로만 유지: {}", e.message)
         }
+        // E2E-복구-2: 컨테이너가 shared_root + userVoicePath로 읽으므로(03a §0)
+        // 공유폴더에 동일 바이트 사본을 기록한다. 실패 시 즉시 실패 — 조용히
+        // 통과하면 컨테이너 404로 다시 변장한다.
+        val sharedFile = java.io.File(sharedAudioRoot, objectKey)
+        try {
+            sharedFile.parentFile.mkdirs()
+            java.nio.file.Files.write(sharedFile.toPath(), bytes)
+        } catch (e: Exception) {
+            throw IllegalStateException("공유폴더 음성 기록 실패 (${sharedFile.path}): ${e.message}", e)
+        }
+        logger.info("유저 음성 공유폴더 사본 기록: {}", sharedFile.path)
     }
 
     /** 턴 결과 (컨테이너 전달용): 8평가턴 — type 소문자 camelCase 매핑 */
