@@ -38,4 +38,19 @@ interface VoiceRecordRepository : JpaRepository<VoiceRecord, Long> {
         @Param("speakingTime") speakingTime: java.math.BigDecimal?,
         @Param("articulationTime") articulationTime: java.math.BigDecimal?
     ): Int
+
+    /**
+     * [e2e3-A] 같은 턴 재제출 시 지표 리셋 + 경로 갱신 — ID 보존(voiceRecordId 계약).
+     * voice_file_path도 새 objectKey로 갱신한다(재제출 파일로 교체 의미).
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        "UPDATE VoiceRecord v SET v.voiceFilePath = :objectKey, v.durationSeconds = NULL, " +
+            "v.syllables = NULL, v.speakingTime = NULL, v.articulationTime = NULL " +
+            "WHERE v.id = :voiceRecordId"
+    )
+    fun updateUserVoiceMetricsToNull(
+        @Param("voiceRecordId") voiceRecordId: Long,
+        @Param("objectKey") objectKey: String
+    ): Int
 }

@@ -157,20 +157,33 @@ class SessionScoringService(
         turn.status = "SUBMITTED"
         turnRepository.save(turn)
 
-        // c. VOICE_RECORD USER 행 — 지표 3종 null로 즉시 적재 (채점 완료 시 UPDATE)
+        // c. VOICE_RECORD USER 행 — 지표 3종 null로 즉시 적재 (채점 완료 시 UPDATE).
+        // ⚠️ UQ_VOICE_RECORD_TURN_SPEAKER (turn_id+speaker) — 같은 턴 재제출 시 INSERT가
+        // ORA-00001로 죽는다. 기존 USER 행이 있으면 그 행의 ID를 재사용(지표는 null로
+        // 리셋 — 채점 워커가 다시 UPDATE한다. 워커 실패→재제출 경로의 멱등 처리).
         val turnIdVal = turn.id!!
-        val voiceRecord = VoiceRecord(
-            userId = userId,
-            sessionId = sessionId,
-            turnId = turnIdVal,
-            speaker = "USER",
-            voiceFilePath = objectKey,
-            durationSeconds = null,
-            syllables = null,
-            speakingTime = null,
-            articulationTime = null
-        )
-        voiceRecordRepository.save(voiceRecord)
+        val existingRecord = voiceRecordRepository.findByTurnId(turnIdVal)
+            .firstOrNull { it.speaker == "USER" }
+        val voiceRecord = if (existingRecord != null) {
+            voiceRecordRepository.updateUserVoiceMetricsToNull(
+                existingRecord.id!!, objectKey
+            )
+            existingRecord
+        } else {
+            val created = VoiceRecord(
+                userId = userId,
+                sessionId = sessionId,
+                turnId = turnIdVal,
+                speaker = "USER",
+                voiceFilePath = objectKey,
+                durationSeconds = null,
+                syllables = null,
+                speakingTime = null,
+                articulationTime = null
+            )
+            voiceRecordRepository.save(created)
+            created
+        }
 
         // e. afterCommit → 백그라운드 채점 (메인 트랜잭션 커밋 보장 — 데이터 일관성)
         TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
