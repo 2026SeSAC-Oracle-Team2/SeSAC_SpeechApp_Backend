@@ -118,7 +118,24 @@ class SessionCreationService(
         val relaxed = namingPool.size < requiredPerType || selfTalkPool.size < requiredPerType || listenPool.isEmpty()
         val namingFinal = if (namingPool.size >= requiredPerType) namingPool else imageList
         val selfTalkFinal = if (selfTalkPool.size >= requiredPerType) selfTalkPool else imageList
-        val listenFinal = if (listenPool.isNotEmpty()) listenPool else imageList
+        // [e2e3-C] LISTEN 폴백 한정: 구 폴백은 "imageList 전체"라 TAG 있는 SELF_TALK 이미지가
+        // LISTEN 선택지로 누출(세션256 실측 — cafe_1·cafe_3 등장). 컨테이너는 요청 풀을
+        // 그대로 선택지로 쓰므로, TAG 없는 이미지만 남겨야 유형이 지켜진다(지시서 [C]-a).
+        // TAG 없는 이미지 0건이면 listenPicture 턴 생성 불가 — 컨테이너가 유형 개수를
+        // 결정하는 구조(03a)상 요청 턴 수를 줄일 방법이 없어 경고 로그만 남기고 현행 폴백 유지.
+        val listenTagless = imageList.filter { img ->
+            poolImages.any { it.imageId == img.imageId && it.imageTagPath.isNullOrBlank() }
+        }
+        val listenFinal = if (listenPool.isNotEmpty()) listenPool
+            else if (listenTagless.isNotEmpty()) listenTagless
+            else imageList
+        if (listenPool.isEmpty() && listenTagless.isNotEmpty()) {
+            logger.warn(
+                "[e2e3-C] LISTEN 조건 풀 부족 — TAG 없는 이미지 {}건으로 한정 (전체={}): " +
+                    "LISTEN 선택지에 TAG(SELF_TALK) 이미지 노출 방지",
+                listenTagless.size, imageList.size
+            )
+        }
         if (relaxed) {
             logger.warn(
                 "[v1.2] 조건 이미지 풀 부족 — 필터 완화 (namingPool={}, selfTalkPool={}, listenPool={}, 전체={}): " +
