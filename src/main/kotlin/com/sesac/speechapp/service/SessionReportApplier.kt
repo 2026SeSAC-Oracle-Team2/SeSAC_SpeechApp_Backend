@@ -33,7 +33,9 @@ class SessionReportApplier(
     private val scoreCalc: com.sesac.speechapp.service.ScoreCalculationService,
     private val turnImageRepository: com.sesac.speechapp.repository.TurnImageRepository,
     private val imageResourceRepository: com.sesac.speechapp.repository.ImageResourceRepository,
-    private val voiceRecordRepository: com.sesac.speechapp.repository.VoiceRecordRepository
+    private val voiceRecordRepository: com.sesac.speechapp.repository.VoiceRecordRepository,
+    // [e2e3-I] tags.json 원본 다운로드 — problemfiles 버킷 접근 전용 서비스
+    private val contentImageStorage: com.sesac.speechapp.service.ContentImageStorageService
 ) {
     private val logger = LoggerFactory.getLogger(SessionReportApplier::class.java)
 
@@ -123,6 +125,8 @@ class SessionReportApplier(
                 val imageId = turnImageRepository.findByTurnIdOrderByImageOrderAsc(turnId)
                     .firstOrNull()?.imageId
                 val imageName = imageId?.let { imageResourceRepository.findById(it).orElse(null)?.imageName } ?: ""
+                // [e2e3-I] problemTag 더미 폐지 — IMAGE_TAG_PATH 원본 JSON을 읽어 그대로 전송.
+                // 원본 없는 이미지는 더미 유지 + WARN 1건(지시서 [I]-a).
                 val problemTag = buildSelfTalkProblemTag(turn, imageId, imageName)
                 val response = container.scoreSelfTalk(
                     com.sesac.speechapp.dto.aicontainer.SelfTalkScoreRequest(
@@ -166,14 +170,57 @@ class SessionReportApplier(
     }
 
     /**
-     * [e2e3-A·I 예정] problemTag 조립 — 지시서 [I]에서 TAG_PATH 원본 JSON 연동 예정.
-     * 현재는 기존 더미 규약 유지(수정 없음 — [I] 단위에서 교체).
+     * [e2e3-I] problemTag 조립 — IMAGE_RESOURCE.IMAGE_TAG_PATH 원본 JSON 연동.
+     *
+     * tagPath("69/69.tags.json") → OCI objectKey("images/69/69.tags.json",
+     * admin_page build_key 동일 규약) → ContentImageStorageService.getObject로
+     * 스트림 다운로드 → 원문 문자열 그대로 반환. 컨테이너 parse_self_talk_concepts가
+     * 3형태 전부 수용하므로 원문 그대로가 정답(지시서 [I]: "원본 그대로 전송만").
+     * - tagPath 없음(데이터 없는 이미지): 기존 더미 유지 + WARN 1건
+     * - 다운로드 실패: WARN 1건 + 더미 폴백(채점 계속 — 컨테이너 legacy 폴백 존재)
      */
     private fun buildSelfTalkProblemTag(
         turn: com.sesac.speechapp.entity.Turn,
         imageId: Long?,
         imageName: String
-    ): String = """{"tags": ["사람", "상황", "행동", "$imageName"]}"""
+    ): String {
+        if (imageId == null) {
+            logger.warn("[e2e3-I] SELF_TALK 턴에 매핑된 이미지 없음 — 더미 태그 사용: turnId={}", turn.id)
+            return """{"tags": ["사람", "상황", "행동", "$imageName"]}"""
+        }
+        val image = imageResourceRepository.findById(imageId).orElse(null)
+        val tagPath = image?.imageTagPath?.trim()?.trimStart('/')
+        if (tagPath.isNullOrBlank()) {
+            logger.warn(
+                "[e2e3-I] IMAGE_TAG_PATH 데이터 없음 — 더미 태그 사용(imageId={}, tags.json 업로드 필요): turnId={}",
+                imageId, turn.id
+            )
+            return """{"tags": ["사람", "상황", "행동", "$imageName"]}"""
+        }
+        return try {
+            val objectKey = buildContentTagKey(tagPath)
+            val response = contentImageStorage.getObject(objectKey)
+            val json = response.inputStream.use { it.readBytes() }.toString(Charsets.UTF_8)
+            logger.info("[e2e3-I] tags.json 원본 로드: imageId={}, key={} ({} bytes)", imageId, objectKey, json.length)
+            json
+        } catch (e: Exception) {
+            logger.warn(
+                "[e2e3-I] tags.json 로드 실패 — 더미 태그 폴백(imageId={}, path={}, cause={}): turnId={}",
+                imageId, tagPath, e.message, turn.id
+            )
+            """{"tags": ["사람", "상황", "행동", "$imageName"]}"""
+        }
+    }
+
+    /** [e2e3-I] DB 상대경로 → 버킷 객체 키 ("69/69.tags.json" → "images/69/69.tags.json") */
+    private fun buildContentTagKey(relPath: String): String {
+        val path = relPath.trimStart('/')
+        return if (path.startsWith("images/") || path.startsWith("tmp/")) {
+            path
+        } else {
+            "images/" + path
+        }
+    }
 
     /**
      * 상세 보고서(/report/total) 응답 적용:
