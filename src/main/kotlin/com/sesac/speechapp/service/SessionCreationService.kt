@@ -216,16 +216,18 @@ class SessionCreationService(
             }
 
             // VOICE_RECORD AI 행 (TTS 경로 매핑)
+            // E2E-복구-2: 컨테이너가 실물 생성한 ttsPath를 그대로 저장한다.
+            // - real 모드: "{userUUID}/{sid}/{n}_ai.mp3" (공유폴더 상대경로 —
+            //   VoiceStreamController가 shared-audio-root 결합해 실물 스트리밍)
+            // - stub 모드: "stub/tts_{n}_ai.mp3" 더미 문자열 (컨트롤러 %4 스텁 분기 유지)
             var voiceRecordId: Long? = null
             if (problem.ttsPath != null) {
-                val stubFile = SessionTurnSupport.stubTtsFile(turn.contentType)
                 val voiceRecord = VoiceRecord(
                     userId = userId,
                     sessionId = sessionId,
                     turnId = turnIdVal,
                     speaker = "AI",
-                    // B-4 (D-5): 타입별 전용 샘플 매핑 확정 — classpath tts_samples
-                    voiceFilePath = "classpath:tts_samples/$stubFile",
+                    voiceFilePath = problem.ttsPath,
                     speakingTime = null,
                     articulationTime = null
                 )
