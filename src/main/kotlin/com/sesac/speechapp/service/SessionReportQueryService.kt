@@ -196,8 +196,27 @@ class SessionReportQueryService(
                     correct = correct
                 )
             }
+            // [e2e4-E-4] 정답 표시 규약 변경 (사용자 계약 원문):
+            //  · "보고서에서 따라말하기, 이름대기의 정답 필드에 문제의 정답이 아닌
+            //    유저의 답변이 표기되고 있음 (TURN.ANSWER_TEXT가 아닌
+            //    TURN.PROMPT_TEXT를 쓰면 됨)" → value = promptText(문제의 정답/지문)
+            //  · "스스로말하기의 정답이 표시되지 않도록 변경 필요(정답이 표시될
+            //    필요가 없는 유형임)" → AnswerDto null 반환 — 클라가 정답 행을
+            //    렌더하지 않는다.
+            //  · LISTEN은 미접촉 — 기존 계약 유지(LISTEN_PICTURE 이미지 정답 정상 확인).
+            "NAMING", "SHADOWING" -> {
+                AnswerDto(
+                    mediaType = "voice",
+                    value = t.promptText,   // 문제의 정답(이름대기=정답 단어/따라말하기=원문)
+                    correct = null,
+                    voiceUrl = voiceRecordRepository.findByTurnId(t.id!!).firstOrNull { it.speaker == "USER" }
+                        ?.let { "/api/v1/voice/${it.id}" }
+                )
+            }
+            "SELF_TALK" -> null   // 정답 개념이 없는 유형 — 정답 행 미표시
             else -> {
-                val voice = voiceRecordRepository.findByTurnId(t.id!!).firstOrNull { it.speaker == "USER" }
+                // 방어 분기 — contentType은 CHECK 제약 6종으로 한정되지만 STORYTELLING
+                // 등이 들어오면 기존 규약(유저 답변)을 유지한다.
                 AnswerDto(
                     mediaType = "voice",
                     value = t.answerText,
