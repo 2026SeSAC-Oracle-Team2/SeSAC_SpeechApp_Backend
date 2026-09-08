@@ -238,7 +238,9 @@ class SessionCreationService(
             //   VoiceStreamController가 shared-audio-root 결합해 실물 스트리밍)
             // - stub 모드: "stub/tts_{n}_ai.mp3" 더미 문자열 (컨트롤러 %4 스텁 분기 유지)
             var voiceRecordId: Long? = null
-            if (problem.ttsPath != null) {
+            // [e2e3-H] TTS 스킵 유형: 컨테이너가 ttsPath=""(공백)를 보내면 VOICE_RECORD
+            // AI 행을 만들지 않는다(클라 ttsUrl 404 방지). null·공백 모두 스킵.
+            if (!problem.ttsPath.isNullOrBlank()) {
                 val voiceRecord = VoiceRecord(
                     userId = userId,
                     sessionId = sessionId,
