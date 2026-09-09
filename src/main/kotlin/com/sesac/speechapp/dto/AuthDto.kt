@@ -1,6 +1,7 @@
 package com.sesac.speechapp.dto
 
 import java.math.BigDecimal
+import com.fasterxml.jackson.annotation.JsonProperty
 import java.time.Instant
 
 class AuthResponse(
@@ -8,7 +9,7 @@ class AuthResponse(
     val refreshToken: String,
     val expiresIn: Long,
     val user: UserDto,
-    val isNewUser: Boolean
+    @JsonProperty("isNewUser") val isNewUser: Boolean
 )
 
 class UserDto(
