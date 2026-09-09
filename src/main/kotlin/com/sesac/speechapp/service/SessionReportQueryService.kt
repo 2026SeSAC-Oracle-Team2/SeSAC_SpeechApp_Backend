@@ -244,7 +244,16 @@ class SessionReportQueryService(
                         ?.let { "/api/v1/voice/${it.id}" }
                 )
             }
-            "SELF_TALK" -> null   // 정답 개념이 없는 유형 — 정답 행 미표시
+            // [e2e6-P-2] 정답 미표시 계약(e2e4-E4) 유지 + "내가 말한 답변" 재생 복원
+            // (사용자 계약: "스스로말하기 내가 말한 답변 버튼이 없음"). value=null로
+            // 정답 행을 렌더하지 않되 voiceUrl만 제공 — 클라 bindPlayer 활성.
+            "SELF_TALK" -> AnswerDto(
+                mediaType = "voice",
+                value = null,   // 정답 개념 없는 유형 — value null로 미노출 (클라 렌더 금지)
+                correct = null,
+                voiceUrl = voiceRecordRepository.findByTurnId(t.id!!).firstOrNull { it.speaker == "USER" }
+                    ?.let { "/api/v1/voice/${it.id}" }
+            )
             else -> {
                 // 방어 분기 — contentType은 CHECK 제약 6종으로 한정되지만 STORYTELLING
                 // 등이 들어오면 기존 규약(유저 답변)을 유지한다.
