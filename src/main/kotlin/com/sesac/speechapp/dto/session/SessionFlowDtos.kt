@@ -87,7 +87,12 @@ data class TalkData(
 
 data class FinishData(
     val sessionAQ: Int,
-    val feedbacks: FeedbacksDto
+    val feedbacks: FeedbacksDto,
+    // [e2e4-E-3] 간이보고서 세부 확장 — GET /report와 동일 구조(radar+4지표 확장 카드),
+    // talkHistory 제외(사용자 계약: "세부보고서 양식 그대로, AI대화 피드백·내역만 삭제").
+    // null이면 클라가 기존 간이 렌더(피드백만)로 폴백 — 하위호환.
+    val radar: RadarDto? = null,
+    val metricCards: List<MetricCardDto> = emptyList()
 )
 
 /**
@@ -141,6 +146,12 @@ data class MetricTurnDto(
     val ttsUrl: String?,
     val imageUrl: String?,
     val answer: AnswerDto?
+)
+
+/** [e2e4-E-3] 간이보고서 세부 확장용 — radar+metricCards (talkHistory 제외) */
+data class BriefReportData(
+    val radar: RadarDto,
+    val metricCards: List<MetricCardDto>
 )
 
 data class MetricCardDto(

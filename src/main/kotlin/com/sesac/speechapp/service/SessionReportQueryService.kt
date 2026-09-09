@@ -1,6 +1,7 @@
 package com.sesac.speechapp.service
 
 import com.sesac.speechapp.dto.session.AnswerDto
+import com.sesac.speechapp.dto.session.BriefReportData
 import com.sesac.speechapp.dto.session.MetricCardDto
 import com.sesac.speechapp.dto.session.MetricTurnDto
 import com.sesac.speechapp.dto.session.RadarDto
@@ -146,6 +147,36 @@ class SessionReportQueryService(
             reportViewedAt = recordedViewedAt?.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)
                 ?: session.reportViewedAt?.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)
         )
+    }
+
+    /**
+     * [e2e4-E-3] 간이보고서용 metricCards 조립 — GET /report와 동일 구조(radar+4지표
+     * 확장 카드), talkHistory만 제외. 사용자 계약: "세부보고서 양식을 그대로 가져다
+     * 쓰되, AI대화 피드백 및 대화 내역만 지우면 됨".
+     * finish 세션은 8턴 SCORED 확정이라 E0404 위험 없음 — [A] 비동기 채점 정합.
+     * SessionReportQueryService를 SessionScoringService에 주입해 재사용(로직 단일화).
+     */
+    @Transactional(readOnly = true)
+    fun buildBriefReportData(sessionId: Long, userId: Long): BriefReportData {
+        val session = sessionRepository.findById(sessionId)
+            .orElseThrow { IllegalArgumentException("존재하지 않는 세션입니다: $sessionId") }
+        if (session.userId != userId) {
+            throw IllegalArgumentException("세션 소유 사용자만 조회할 수 있습니다 (sessionId=$sessionId)")
+        }
+        val turns = turnRepository.findBySessionIdOrderByTurnNumberAsc(sessionId)
+        val radar = RadarDto(
+            listen = avgScoreOf(turns, listOf("LISTEN_TEXT", "LISTEN_PICTURE")),
+            naming = avgScoreOf(turns, listOf("NAMING")),
+            shadowing = avgScoreOf(turns, listOf("SHADOWING")),
+            selfTalk = avgScoreOf(turns, listOf("SELF_TALK"))
+        )
+        val metricCards = listOf(
+            metricCard("LISTEN", session.listenFeedback, turns, listOf("LISTEN_TEXT", "LISTEN_PICTURE")),
+            metricCard("NAMING", session.namingFeedback, turns, listOf("NAMING")),
+            metricCard("SHADOWING", session.shadowingFeedback, turns, listOf("SHADOWING")),
+            metricCard("SELF_TALK", session.selfTalkFeedback, turns, listOf("SELF_TALK"))
+        )
+        return BriefReportData(radar = radar, metricCards = metricCards)
     }
 
     private fun metricCard(

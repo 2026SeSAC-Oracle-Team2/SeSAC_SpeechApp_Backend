@@ -52,6 +52,8 @@ class SessionScoringService(
     private val scoreCalculationService: ScoreCalculationService,
     private val userService: UserService,
     private val sessionReportBackgroundWorker: SessionReportBackgroundWorker,
+    // [e2e4-E-3] 간이보고서 세부 조립 — metricCard 로직 재사용(단일 출처)
+    private val sessionReportQueryService: SessionReportQueryService,
     private val objectStorageService: ObjectStorageService,
     @Value("\${demo.talk-turn-limit:8}") private val talkTurnLimit: Int,
     @Value("\${ai.container.shared-audio-root:/home/opc/containers/llm}") private val sharedAudioRoot: String
@@ -422,6 +424,10 @@ class SessionScoringService(
         val userTalkAnswers = talkTurns.count { it.answerText != null }
 
         // 간이 보고서 데이터 — 8문제 채점 완료 시점에 이미 적재된 세션 값 (미완료 세션이면 null)
+        // [e2e4-E-3] 간이보고서 세부 확장 — 8문제 턴(radar+metricCards)을 finish 응답에
+        // 동봉(옵션 A 확정안). talkHistory는 제외. 세션 종료 시점엔 8턴 SCORED 확정이라
+        // [A] 비동기 채점과 정합 — 미완료 세션도 턴별 score null로 안전 렌더.
+        val brief = sessionReportQueryService.buildBriefReportData(sessionId, session.userId)
         val finishData = FinishData(
             sessionAQ = session.aq ?: 0,
             feedbacks = FeedbacksDto(
@@ -431,7 +437,9 @@ class SessionScoringService(
                 selfTalkFeedback = session.selfTalkFeedback,
                 talkFeedback = null,     // 2단계 계약: 상세는 /report/total → §8.3에서 수령
                 totalFeedback = null
-            )
+            ),
+            radar = brief.radar,
+            metricCards = brief.metricCards
         )
 
         if (userTalkAnswers in 1..3) {
