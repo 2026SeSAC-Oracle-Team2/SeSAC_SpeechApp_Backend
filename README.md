@@ -10,17 +10,19 @@
 | 영역 | 완료 | 상태 |
 |------|------|------|
 | 프로젝트 초기화 | ✅ | Spring Boot 4.1.1 + Kotlin 2.3.21 + Gradle wrapper |
-| DB Entity (H2) | ✅ | `AppUser`, `UserProfile` — JPA + H2 인메모리 |
-| Firebase Auth | ✅ | ID Token 검증 + 자체 JWT(Access/Refresh) 발급/검증 |
-| 인증 API | ✅ | `POST /auth/firebase`, `POST /auth/refresh`, `POST /auth/logout` |
-| 사용자 API | ✅ | `GET /users/me`, `PATCH /users/me` |
+| 인증 API | ✅ | Firebase ID Token 검증 + 자체 JWT(Access/Refresh) 발급/검증 — `POST /auth/firebase`, `/auth/refresh`, `/auth/logout` |
+| 사용자 API | ✅ | `GET /users/me`, `PATCH /users/me` (닉네임·성별·생년월일·취미·태그), 탈퇴 FK 역순 8단계 |
+| 가입 플로우 API | ✅ | 태그 15종 조회, 설문 접수(서버 산출 AQ), 대표점수 조회 |
+| Oracle DB 연동 | ✅ | Oracle XE 21c — 세션/턴/음성 도메인 12테이블, Hibernate validate |
+| OCI Object Storage | ✅ | 음성 업로드·스트리밍·삭제, PAR(기간제 URL) 발급 |
+| 음성 업로드 API | ✅ | multipart 제출 → 임시 저장 → Object Storage 영구 저장 (sharedVoicePath → voiceObjectKey) |
+| 세션 플로우 API | ✅ | 오늘의 학습/테마별 분기, 턴 4유형 제출(LISTEN·NAMING·SHADOWING·SELF_TALK), AI 대화 8턴, 리포트 2단계(간이/상세) |
+| 채점·AQ 산출 | ✅ | 규칙 채점 + LLM 채점(CIU) 분리, AQ = 2×(A+B+C+D) 가중 결합, 백그라운드 리포트 생성 |
+| AI 컨테이너 연동 | ✅ | RestClient 기반 클라이언트 — stub/real `@ConditionalOnProperty` 전환 (03a 계약 v1.12) |
+| 개인화 | ✅ | userMemory(8192자 캡) 리포트 시점 갱신, 태그 기반 문항 주입, 지표 기반 난이도 |
 | 에러 핸들링 | ✅ | `GlobalExceptionHandler` + Logback |
-| 음성 업로드 API | ⬜ | Phase 3에서 진행 예정 |
-| WebSocket | ⬜ | Phase 3에서 진행 예정 |
-| Oracle DB 연동 | ⬜ | Database 세션 DDL 완료 후 교체 예정 |
-| AI 컨테이너 연동 | ⬜ | AI Containers 세션 완료 후 연동 예정 |
 
-> **오늘 완료 체크포인트:** Android가 Firebase Google Sign-In 후 메인 화면까지 진입할 수 있도록 **인증 API** 완성
+> 프로젝트 종료 기준 (2026-09-12): 전 도메인 구현 완료, E2E 실측 통과.
 
 ---
 
@@ -46,12 +48,15 @@ SeSAC_SpeechApp_Backend/
 ├── src/
 │   └── main/
 │       ├── kotlin/com/sesac/speechapp/
-│       │   ├── config/         # JwtProperties, SecurityConfig
-│       │   ├── controller/   # AuthController, UserController
-│       │   ├── service/      # AuthService, UserService
-│       │   ├── repository/   # AppUserRepository, UserProfileRepository
-│       │   ├── entity/       # AppUser, UserProfile
-│       │   ├── dto/          # ApiResponse, AuthDto, FirebaseAuthRequest
+│       │   ├── ai/           # AI컨테이너 클라이언트 (AiContainerClient 인터페이스
+│       │   │                 #   + StubAiContainerClient/RealAiContainerClient 전환)
+│       │   ├── config/       # JwtProperties, SecurityConfig, AsyncConfig
+│       │   ├── controller/   # Auth, User, SessionFlow, Voice, VoiceStream, ContentImage
+│       │   ├── service/      # Auth, User, SessionFlow(생성/채점/리포트 분할), Voice
+│       │   │                 #   ObjectStorage(OCI + PAR), ContentImageStorage
+│       │   ├── repository/   # JPA 레포지토리
+│       │   ├── entity/       # AppUser, UserProfile, Session, Turn, VoiceRecord 등
+│       │   ├── dto/          # API 요청/응답 DTO (컨테이너 계약 dto 분리)
 │       │   ├── exception/    # GlobalExceptionHandler
 │       │   └── security/     # FirebaseAuthUtil, JwtTokenProvider, JwtAuthenticationFilter
 │       └── resources/
@@ -73,9 +78,9 @@ SeSAC_SpeechApp_Backend/
 | 데이터베이스 | H2 (개발) / Oracle XE (운영) | 21c |
 | ORM | Spring Data JPA | 4.1.1 |
 | 인증 | Firebase Auth + 자체 JWT | firebase-admin 9.4.3, jjwt 0.12.6 |
-| 파일 저장 | OCI Object Storage | 향후 연동 |
-| AI 연동 | llm-container / scoring-container | 향후 연동 |
-| 웹소켓 | Spring WebSocket | 향후 연동 |
+| 파일 저장 | OCI Object Storage | oci-java-sdk 3.95 (PAR 발급 포함) |
+| AI 연동 | FastAPI AI 컨테이너 | RestClient (stub/real 전환) |
+| LLM 채점 | Ollama Cloud (gemma) | 컨테이너 경유 — CIU 자발화 채점 |
 
 ---
 
@@ -376,7 +381,19 @@ curl -X POST http://{VM_IP}:8080/api/v1/auth/firebase \
 | `/api/v1/auth/refresh` | POST | Access Token 갱신 | Refresh Token |
 | `/api/v1/auth/logout` | POST | 로그아웃 | Access Token |
 | `/api/v1/users/me` | GET | 내 프로필 조회 | Bearer JWT |
-| `/api/v1/users/me` | PATCH | 내 프로필 수정 (닉네임) | Bearer JWT |
+| `/api/v1/users/me` | PATCH | 내 프로필 수정 (닉네임·성별·생년월일·취미·태그) | Bearer JWT |
+| `/api/v1/sessions/today` | POST | 오늘의 학습 세션 생성 | Bearer JWT |
+| `/api/v1/sessions/theme` | POST | 테마별 학습 세션 생성 | Bearer JWT |
+| `/api/v1/sessions/{id}/turns/{tid}/listen` | POST | 알아듣기 답안 제출 | Bearer JWT |
+| `/api/v1/sessions/{id}/turns/{tid}/naming` | POST | 이름대기 답안 제출 (multipart) | Bearer JWT |
+| `/api/v1/sessions/{id}/turns/{tid}/shadowing` | POST | 따라말하기 답안 제출 (multipart) | Bearer JWT |
+| `/api/v1/sessions/{id}/turns/{tid}/selftalk` | POST | 자발화 답안 제출 (multipart) | Bearer JWT |
+| `/api/v1/sessions/{id}/turns/talk` | POST | AI 대화 턴 | Bearer JWT |
+| `/api/v1/sessions/{id}/finish` | POST | 세션 종료 → 리포트 확정 | Bearer JWT |
+| `/api/v1/sessions/{id}/report` | GET | 리포트 조회 (간이/상세) | Bearer JWT |
+| `/api/v1/voice/upload` | POST | 음성 파일 업로드 (OCI) | Bearer JWT |
+
+> 전체 계약 상세는 [Documentations/05a_Client_API_Reference.md](https://github.com/2026SeSAC-Oracle-Team2/Documentations/blob/main/05a_Client_API_Reference.md) (v1.11) 참고
 
 ---
 
@@ -407,10 +424,9 @@ curl -X POST http://{VM_IP}:8080/api/v1/auth/firebase \
 
 | 브랜치 | 설명 |
 |--------|------|
-| `main` | 운영/배포 브랜치 (Oracle DB 연동) |
-| `feature/auth-api` | **현재 작업 브랜치** — 인증 API 완료 |
-| 향후: `feature/voice-upload` | 음성 업로드 API |
-| 향후: `feature/websocket` | WebSocket + AI 컨테이너 연동 |
+| `main` | 운영/배포 브랜치 — E2E 브랜치 병합 후 프로젝트 종료 기준 최신화 (2026-09-12) |
+
+> 프로젝트 종료로 브랜치는 `main` 단일 운영. 이력이 필요하면 태그/커밋 해시로 조회.
 
 ---
 
@@ -426,5 +442,6 @@ curl -X POST http://{VM_IP}:8080/api/v1/auth/firebase \
 
 | 날짜 | 변경 내용 | 작성자 |
 |------|-----------|--------|
+| 2026-09-12 | 프로젝트 종료 정리 — 진행상황·API·구조 문서 최신화, E2E 브랜치 main 병합 | TEAM 545 |
 | 2026-08-24 | Spring Boot 프로젝트 초기화, 인증 API 완성 | 김윤혁 |
 
