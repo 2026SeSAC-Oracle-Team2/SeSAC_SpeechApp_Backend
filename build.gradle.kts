@@ -22,11 +22,13 @@ repositories {
 
 dependencies {
 	// Spring Boot Starters
-	implementation("org.springframework.boot:spring-boot-starter-web")
-    implementation("org.springframework.boot:spring-boot-starter-restclient")
+	implementation("org.springframework.boot:spring-boot-starter-web")     // REST 서버
+	implementation("org.springframework.boot:spring-boot-starter-restclient") // AI컨테이너 동기 호출 (E2E 브랜치 계약)
+	implementation("org.springframework.boot:spring-boot-starter-webflux")   // 컨테이너 비동기 통신 (WebClient)
 	implementation("org.springframework.boot:spring-boot-starter-data-jpa")
 	implementation("org.springframework.boot:spring-boot-starter-websocket")
 	implementation("org.springframework.boot:spring-boot-starter-security")
+	implementation("org.springframework.retry:spring-retry")                // 컨테이너 호출 재시도
 
 	// Kotlin
 	implementation("org.jetbrains.kotlin:kotlin-reflect")
